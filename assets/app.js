@@ -5461,13 +5461,24 @@ function decodeShare(code){
 }
 function buildShareLink(st){
   var code = encodeShare(st || collectShareStats());
+  /* On Vercel the share link goes straight to /api/share — that route
+     serves crawlers the per-player OG tags and image. The /?s= form
+     stays for every other host (GitHub Pages has no /api/share, and
+     its static page still rebuilds the card from the code). This is
+     needed because the vercel.json rewrite of /?s= to /api/share does
+     not fire on the live deployment — the static index.html wins — so
+     the link itself has to carry the route. */
+  var onVercel = false;
+  try { onVercel = /\.vercel\.app$/.test(window.location.hostname); } catch (e) {}
   try {
     var url = new URL(window.location.href);
     url.hash = "";
+    if (onVercel) url.pathname = "/api/share";
     url.searchParams.set("s", code);
     return url.href;
   } catch (e) {
     var base = window.location.href.split("#")[0].split("?")[0];
+    if (onVercel) base = base.replace(/\/[^\/]*$/, "") + "/api/share";
     return base + "?s=" + code;
   }
 }
