@@ -1,0 +1,719 @@
+  :root{
+    --bg:#101214; --panel:#1b1e22; --panel2:#23272d; --inset:#0c0e10;
+    --line:#3a4048; --line-soft:#2b3037;
+    --ink:#ece9df; --ink-dim:#a9a698; --ink-faint:#7d7f78;
+    --amber:#ffb52e; --amber-dim:#c98f1d;
+    --green:#5fd06e; --red:#ff5a4e; --orange:#ff8a3c;
+    --grid-major:#4a5158; --grid-kp:#333941; --grid-sub:#262b31;
+    --board-bg:#15181c; --board-label:#9aa08f;
+    --mapwash:.48; /* opacity of the board-colour wash over the map photo */
+    --mortar:#ffb52e; --mortar2:#5fd06e; --target:#ff5a4e; --target2:#45c4dc;
+    --chip:#262b31;
+    /* inset (LCD) surfaces stay dark in BOTH schemes — their text must too */
+    --on-inset:#ece9df; --on-inset-dim:#a9a698; --on-inset-faint:#8f9189;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#ddd9cc; --panel:#efede4; --panel2:#e6e3d6; --inset:#26282c;
+      --line:#b9b4a2; --line-soft:#cfccc0;
+      --ink:#22241f; --ink-dim:#5c5e54; --ink-faint:#8a8c80;
+      --amber:#b97a08; --amber-dim:#96650a;
+      --green:#1d7a2e; --red:#c62f24; --orange:#c25e10;
+      --grid-major:#a9a696; --grid-kp:#c2bfb2; --grid-sub:#d5d2c6;
+      --board-bg:#e9e7db; --board-label:#6d6f63;
+      --mapwash:.58;
+      --mortar:#a86e00; --mortar2:#1d7a2e; --target:#c62f24; --target2:#0b7f9e;
+      --chip:#e0ddcf;
+      --on-inset:#ece9df; --on-inset-dim:#a9a698; --on-inset-faint:#8f9189;
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%}
+  body{
+    background:var(--board-bg); color:var(--ink);
+    font-family:"Saira Condensed", system-ui, sans-serif;
+    -webkit-font-smoothing:antialiased;
+    overflow:hidden;
+  }
+  button, select, input{font:inherit; min-height:2.5rem}
+  .mono{font-family:"IBM Plex Mono", ui-monospace, monospace}
+  /* Full-screen stage: the map fills the whole viewport, UI floats over it */
+  .wrap{position:relative; width:100%; height:100dvh; height:100vh; overflow:hidden; background:var(--board-bg)}
+  .maplayer{position:absolute; inset:0; z-index:0}
+  /* Every UI panel floats over the map and is dragged by its header.
+     The panel is a flex column: the header is a fixed (flex:none) row
+     that NEVER scrolls, and only .panelbody scrolls underneath it. */
+  .float-panel{
+    position:absolute; z-index:40;
+    background:var(--panel); border:1px solid var(--line); border-radius:10px;
+    box-shadow:0 14px 34px rgba(0,0,0,.45);
+    max-height:calc(100dvh - 24px); overflow:hidden;
+    display:flex; flex-direction:column;
+  }
+  .panelbody{
+    flex:1 1 auto; min-height:0;
+    overflow-y:auto; overflow-x:hidden;
+    overscroll-behavior:contain;
+  }
+  .float-panel.dragging{box-shadow:0 20px 44px rgba(0,0,0,.6); opacity:.97}
+  .float-panel.collapsed{overflow:hidden}
+  .float-panel.collapsed .panelbody{display:none}
+  .collapsebtn{
+    border:1px solid var(--line); background:var(--panel2); color:var(--ink);
+    border-radius:6px; padding:2px 9px; cursor:pointer; font-weight:700; min-height:2rem; flex:none; line-height:1;
+  }
+  #topPanel{top:12px; left:12px; width:min(500px, calc(100vw - 24px)); padding:10px 12px}
+  /* Controls panel is DOCKED at the bottom left — static, not
+     draggable, like the Mini Game panel. It keeps its zoom + / −
+     buttons inside and its – / + collapse (minimize) button in
+     the header, which folds it down to just its header. The
+     About panel sits at the bottom right so the two never
+     overlap. */
+  #controlsPanel{left:12px; bottom:12px; right:auto; width:min(600px, calc(100vw - 24px)); padding:12px}
+  #controlsPanel .panelhead{cursor:default}
+  #panel{top:12px; right:12px; width:min(672px, calc(100vw - 24px)); padding:12px}
+  #infoPanel{bottom:12px; right:12px; left:auto; width:min(348px, calc(100vw - 24px)); padding:10px 12px; font-size:.9rem}
+  /* ---------- Mini Game — dial training panel — in its own column in the split layout (see the SPLIT LAYOUT block at the end of this stylesheet) ---------- */
+  #gamePanel{top:12px; right:12px; left:auto; width:min(430px, calc(100vw - 24px)); padding:12px; display:none}
+  #gamePanel.open{display:flex}
+  #gamePanel .panelhead{cursor:default}
+  @media (max-width:900px){ #gamePanel{top:12px; right:12px; left:auto; max-height:calc(100dvh - 24px)} }
+  /* Mini Game info panel — the target Summary, the aim notes and the
+     How it works rules in their OWN separate panel. It is NOT docked:
+     it used to sit at the bottom left, where its docked header strip
+     overlapped the Controls panel. Now it is a free-floating panel
+     that opens centred on the grid, can be dragged by its header,
+     and is fully CLOSEABLE — its Close button hides it completely
+     (no docked header left behind). It stays hidden until the player
+     opens it with the "Summary & How it works" button in the Dial
+     game panel, and closing the Mini Game closes it too. */
+  #gameInfoPanel{left:50%; top:50%; transform:translate(-50%,-50%); right:auto; bottom:auto; width:min(620px, calc(100vw - 24px)); padding:10px 12px; display:none; z-index:70; max-height:76dvh}
+  #gameInfoPanel.open{display:flex}
+  .gameinfosec{margin-bottom:12px}
+  .gameinfosec h3{margin:0 0 5px; font-size:.92rem; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-dim)}
+  #gameInfoPanel .gtdesc{font-family:"IBM Plex Mono", monospace; font-size:.82rem; line-height:1.45; color:var(--ink-dim); margin:0}
+  #gameInfoPanel .gameaim{margin:0}
+  #gameInfoPanel .gamehelp{margin-bottom:0}
+  /* HE / Smoke shell switch (Mini Game): each mortar has its OWN
+     magazine of 5 for EACH shell type — the switch picks the shell,
+     the ammo box below tracks every mortar x shell magazine */
+  .shellseg{display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; margin-top:10px}
+  .shellseg button{flex:1; border:0; cursor:pointer; padding:7px 8px; min-height:2.9rem; background:var(--panel2); color:var(--ink-dim); font-weight:700; letter-spacing:.06em; font-size:1rem; display:flex; flex-direction:column; align-items:center; justify-content:center; line-height:1.15}
+  .shellseg button small{font-family:"IBM Plex Mono", monospace; font-size:.72rem; font-weight:500}
+  .shellseg button.active{background:var(--inset); color:var(--on-inset); box-shadow:inset 0 0 0 2px var(--amber-dim)}
+  .shellseg button#shellSmokeBtn.active{box-shadow:inset 0 0 0 2px #9aa5ad}
+  .shellseg button:disabled{opacity:.4; cursor:default}
+  .ammoboth{font-family:"IBM Plex Mono", monospace; font-size:.76rem; line-height:1.5; color:var(--on-inset-dim); margin-top:6px; text-align:center; white-space:pre-line; overflow-wrap:break-word; max-width:100%}
+  @media (max-width:900px){ #gameInfoPanel{width:calc(100vw - 24px); max-height:70dvh} }
+  /* ---------- panels hidden only while the Mini Game is open ---------- */
+  body.game-open #topPanel, body.game-open #panel, body.game-open #infoPanel{display:none}
+  #gameBtn[aria-pressed="true"]{background:var(--inset); color:var(--on-inset); box-shadow:inset 0 0 0 2px var(--orange)}
+  .gameaim{font-size:.95rem; line-height:1.35; color:var(--ink-dim); margin:0 0 8px}
+  .gameaim b{color:var(--ink)}
+  /* compact status card: range + target type + one bar, at a glance */
+  .gamestatus{
+    background:var(--inset); border:1px solid var(--line-soft); border-radius:8px;
+    padding:9px 12px; color:var(--on-inset); margin-bottom:10px;
+  }
+  /* the game status card is NOT inside the game panel: while the
+     Mini Game is open it sits docked at the TOP LEFT over the
+     map — its original spot, restored after the split layout
+     briefly moved it into the game's right-hand column — so its
+     range, target type and health / emplacements / defenders /
+     vehicles bars stay readable without scrolling the panel up
+     and down. It is only shown while the Mini Game is open. */
+  #gameTargetBox{
+    position:absolute; z-index:56; display:none; margin:0;
+    top:12px; left:12px;
+    width:min(620px, calc(100vw - 466px));
+    box-shadow:0 14px 34px rgba(0,0,0,.45);
+  }
+  body.game-open #gameTargetBox{display:block}
+  body.game-open #gameTargetBox.card-hidden{display:none}
+  #gameTargetBox .gamerange{flex:none}
+  #gameTargetBox .gametarget{flex:1 1 auto}
+  /* hideable status card: a slim header row carries Hide summary
+     (folds just the prose, keeping range + bars) and Hide
+     (hides the whole card off the grid). A small pill stays docked
+     top-left to bring the card back. */
+  .cardhead{display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:7px; padding-bottom:6px; border-bottom:1px solid var(--line-soft)}
+  .cardhead .cardtitle{font-size:.72rem; letter-spacing:.14em; color:var(--on-inset-faint); font-weight:700; text-transform:uppercase; white-space:nowrap}
+  .cardhead .headbtns{display:flex; gap:6px; flex:none}
+  #gameTargetShowBtn{
+    position:absolute; z-index:57; display:none; top:12px; left:12px; margin:0;
+    background:var(--inset); color:var(--on-inset); border:1px solid var(--line);
+    border-radius:999px; padding:6px 12px; cursor:pointer; font-weight:700;
+    letter-spacing:.05em; font-size:.88rem; min-height:2.2rem; line-height:1.2;
+    box-shadow:0 10px 24px rgba(0,0,0,.45); white-space:nowrap;
+  }
+  #gameTargetShowBtn:active{transform:translateY(1px)}
+  body.game-open #gameTargetShowBtn.visible{display:block}
+  @media (max-width:900px){
+    /* narrow screens: the game panel spans the width, so the card
+       stays docked top-left across the width and the panel docks
+       below it */
+    #gameTargetBox{left:12px; width:calc(100vw - 24px)}
+    body.game-open #gamePanel{top:min(284px, 42dvh); max-height:calc(100dvh - min(284px, 42dvh) - 12px)}
+    /* card hidden on phones: the game panel moves up under the
+       small Show pill instead of leaving a card-sized gap */
+    body.game-open.card-hidden #gamePanel{top:60px; max-height:calc(100dvh - 72px)}
+  }
+  .gs-top{display:flex; align-items:baseline; justify-content:space-between; gap:12px}
+  .gamerange{text-align:left}
+  .gamerange .lab{font-size:.72rem; letter-spacing:.14em; color:var(--on-inset-faint); font-weight:600; text-transform:uppercase}
+  .gamerange .big{font-family:"IBM Plex Mono", monospace; font-weight:700; color:#ffb52e; font-size:1.9rem; line-height:1.05}
+  .gamerange .big small{font-size:.9rem; color:var(--on-inset-dim); font-weight:500}
+  .gamerange .sub{font-family:"IBM Plex Mono", monospace; font-size:.78rem; color:var(--on-inset-dim)}
+  /* collapsed help: all rules live behind one small summary row */
+  .gamehelp{border:1px solid var(--line-soft); border-radius:8px; background:var(--panel2); margin-bottom:10px}
+  .gamehelp summary{cursor:pointer; font-weight:700; letter-spacing:.06em; color:var(--ink-dim); padding:8px 11px; font-size:.92rem}
+  .gamehelpbody{padding:0 11px 9px; font-size:.9rem; line-height:1.45; display:flex; flex-direction:column; gap:5px}
+  /* range calculator inside the game panel: range in -> angle out,
+     like the in-game calculator the player uses before dialing */
+  .gamecalc{
+    background:var(--inset); border:1px solid var(--line-soft); border-radius:8px;
+    padding:10px 12px; color:var(--on-inset); margin-bottom:10px;
+  }
+  .gamecalc .lab{font-size:.78rem; letter-spacing:.16em; color:var(--on-inset-faint); font-weight:600; text-transform:uppercase; text-align:center}
+  .calcrow{display:flex; gap:10px; align-items:stretch; margin-top:8px}
+  .calcrow .field{flex:1; margin-bottom:0}
+  .calcrow input{
+    width:100%; padding:7px 10px; border-radius:6px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--ink);
+    font-family:"IBM Plex Mono", monospace; font-size:1.15rem; font-weight:700; text-align:center;
+  }
+  .calcrow input:focus{outline:2px solid var(--amber-dim); outline-offset:0}
+  .calcresult{
+    flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    border:1px solid var(--line-soft); border-radius:6px; padding:4px 8px; text-align:center;
+  }
+  .calcresult .clab{font-size:.72rem; letter-spacing:.14em; color:var(--on-inset-faint); font-weight:600; text-transform:uppercase}
+  .calcresult .cval{font-family:"IBM Plex Mono", monospace; font-weight:700; font-size:1.35rem; line-height:1.15; color:#ffb52e}
+  .calcresult .cval small{font-size:.85rem; color:var(--on-inset-dim); font-weight:500}
+  .calcresult .csub{font-family:"IBM Plex Mono", monospace; font-size:.78rem; color:var(--on-inset-dim)}
+  svg#trainDial{display:block; width:100%; max-width:308px; height:auto; margin:0 auto}
+  .wsrow{display:flex; gap:10px; margin-top:10px}
+  .wsbtn{
+    flex:1; border:1px solid var(--line); border-radius:8px; cursor:pointer; min-height:3.4rem;
+    background:var(--panel2); color:var(--ink); font-weight:700; letter-spacing:.05em; font-size:1.05rem;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:0; line-height:1.15;
+    touch-action:none; user-select:none; -webkit-user-select:none;
+  }
+  .wsbtn small{font-family:"IBM Plex Mono", monospace; font-size:.74rem; font-weight:500; color:var(--ink-dim); letter-spacing:.04em}
+  .wsbtn:active, .wsbtn.held{background:var(--inset); color:var(--on-inset); box-shadow:inset 0 0 0 2px var(--amber-dim)}
+  .wsbtn:disabled{opacity:.4; cursor:default; box-shadow:none}
+  .firebtn{
+    width:100%; margin-top:10px; border:1px solid #a52a20; border-radius:8px; cursor:pointer; min-height:3rem;
+    background:#7e1d16; color:#fff; font-weight:700; letter-spacing:.14em; font-size:1.1rem;
+  }
+  .firebtn:active{transform:translateY(1px)}
+  .firebtn:disabled{opacity:.4; cursor:default}
+  /* Separate FIRE per mortar: one button for each mortar, side by
+     side when both are placed — firing one never fires the other.
+     Mortar 1 keeps the red FIRE, Mortar 2 gets a green FIRE to
+     match its green marker, each labelled with its own ammo. */
+  .firebtns{display:flex; gap:8px; margin-top:10px}
+  .firebtns .firebtn{flex:1 1 0; width:auto; margin-top:0; min-width:0; padding:6px 4px; letter-spacing:.08em}
+  .firebtns .firebtn.fire-m2{background:#14532d; border-color:#1d7a2e}
+  .firebtns.single .firebtn{flex:1 1 100%}
+  /* Separate RELOAD per mortar: one reload column for each mortar,
+     side by side when both are placed — reloading one never reloads
+     the other, each runs on its own timer, and each has its own
+     Skip next batch and its own status line. Mortar 2's RELOAD gets
+     a green edge to match its green marker, like its FIRE button. */
+  .reloadbtns{display:flex; gap:8px; margin-top:8px}
+  .reloadbtns .reloadcol{flex:1 1 0; min-width:0}
+  .reloadbtns .reloadbtn{margin-top:0; width:100%; padding:6px 4px; letter-spacing:.08em}
+  .reloadbtns .reloadbtn.reload-m2{border-color:var(--mortar2)}
+  .reloadbtns .skipbatchbtn{margin-top:6px}
+  .reloadbtns.single .reloadcol{flex:1 1 100%}
+  /* Separate dial per mortar: the selector above the training dial
+     picks WHICH mortar's dial W/S is turning. Each mortar keeps its
+     own mils for its own target — switching tabs restores that
+     mortar's setting untouched, it never copies the other mortar's. */
+  .dialseg{display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; margin-bottom:8px}
+  .dialseg button{flex:1; border:0; cursor:pointer; padding:7px 6px; min-height:2.9rem; background:var(--panel2); color:var(--ink-dim); font-weight:700; letter-spacing:.05em; font-size:.98rem; display:flex; flex-direction:column; align-items:center; justify-content:center; line-height:1.15}
+  .dialseg button small{font-family:"IBM Plex Mono", monospace; font-size:.72rem; font-weight:500}
+  .dialseg button.active{background:var(--inset); color:var(--on-inset); box-shadow:inset 0 0 0 2px var(--amber-dim)}
+  .dialseg button#dialM2Btn.active{box-shadow:inset 0 0 0 2px var(--mortar2)}
+  .dialseg button:disabled{opacity:.4; cursor:default}
+  .dialboth{font-family:"IBM Plex Mono", monospace; font-size:.76rem; line-height:1.5; color:var(--ink-dim); text-align:center; margin:0 0 6px}
+  .nextbtn{
+    width:100%; margin-top:8px; border:1px solid var(--line); border-radius:8px; cursor:pointer; min-height:2.75rem;
+    background:var(--panel2); color:var(--ink); font-weight:700; letter-spacing:.08em;
+  }
+  .nextbtn:disabled{opacity:.4; cursor:default}
+  .gamefeedback{
+    margin-top:10px; border:1px solid var(--line-soft); border-radius:8px; padding:9px 11px;
+    font-size:1rem; line-height:1.4; min-height:2.6em; background:var(--panel2);
+  }
+  .gamefeedback.hit{border-color:var(--green); color:var(--green); font-weight:700}
+  .gamefeedback.near{border-color:var(--orange); color:var(--orange); font-weight:700}
+  .gamefeedback.miss{border-color:var(--red); color:var(--red); font-weight:700}
+  .gamescore{font-family:"IBM Plex Mono", monospace; font-size:.9rem; color:var(--ink-dim); text-align:center; margin-top:8px}
+  .gamescore b{color:var(--amber)}
+  /* target-type status: timeout bar for movers, health bar for hard
+     targets, and the 5-round magazine with its reload button */
+  .gametarget{text-align:right}
+  .gtlabel{font-weight:700; letter-spacing:.1em; font-size:.98rem; color:var(--orange)}
+  /* the target summary sits directly under the target type label
+     on the status card while the game is open — Hide summary on
+     the card folds just this prose, Hide hides the whole
+     card off the grid; the same text is mirrored in the
+     Summary & How it works panel */
+  .gtlabelrow{display:flex; align-items:center; justify-content:flex-end; gap:8px}
+  .summarybtn{
+    border:1px solid var(--on-inset-faint); background:transparent; color:var(--on-inset);
+    border-radius:6px; padding:2px 9px; cursor:pointer; font-weight:700; min-height:1.8rem;
+    font-size:.8rem; letter-spacing:.06em; flex:none; line-height:1.2; white-space:nowrap;
+  }
+  .summarybtn:active{transform:translateY(1px)}
+  .gtdesc{font-family:"IBM Plex Mono", monospace; font-size:.76rem; line-height:1.35; color:var(--on-inset-dim); margin-top:2px}
+  .gtdesc[hidden]{display:none}
+  .gtrow{display:flex; align-items:center; gap:9px; margin-top:6px}
+  .gtlab{font-size:.74rem; letter-spacing:.1em; font-weight:700; color:var(--on-inset-faint); text-transform:uppercase; width:6.6em; flex:none}
+  .barwrap{flex:1; height:12px; border:1px solid var(--line-soft); border-radius:6px; overflow:hidden; background:var(--panel2)}
+  .barfill{height:100%; width:100%; background:var(--green); transition:width .2s linear}
+  .barfill.hp{background:var(--red)}
+  .gtval{font-size:.86rem; color:var(--on-inset); white-space:nowrap; min-width:4.2em; text-align:right}
+  .ammopips{color:#ffb52e; letter-spacing:.18em; font-size:1rem; flex:1}
+  /* RELOAD matches FIRE / Next target exactly in size and shape:
+     full-width block, same height, radius, weight and letter-spacing
+     as the FIRE button (Next target is the same block shape) — only
+     its amber accent tells it apart */
+  .reloadbtn{
+    display:block; width:100%; margin-top:8px;
+    border:1px solid var(--amber-dim); background:var(--panel2); color:var(--ink);
+    border-radius:8px; cursor:pointer; min-height:3rem;
+    font-weight:700; letter-spacing:.14em; font-size:1.1rem;
+  }
+  .reloadbtn:active{transform:translateY(1px)}
+  .reloadbtn:disabled{opacity:.4; cursor:default}
+  /* Skip next batch: a smaller dashed companion under RELOAD, only
+     live while a reload is running — stops the reload at the shells
+     already loaded (2 or 4) instead of always topping up to 5 */
+  .skipbatchbtn{min-height:2.5rem; font-size:.95rem; letter-spacing:.06em; border-style:dashed; margin-top:6px}
+  /* Skip target: same block shape as Next target, orange edge so it
+     reads as the give-up / reveal action */
+  .skipbtn{border-color:var(--orange)}
+  /* Ask spotter: same block shape, green edge — a live-round aid,
+     enabled only once a round has landed this round */
+  .spotterbtn{border-color:var(--green)}
+  /* the dashed ring around a commander-called mark: the UAV is
+     orbiting the target, so the ring slowly spins (its drone badge
+     sits outside the spinning group and stays upright) */
+  .uavring{transform-box:fill-box; transform-origin:center; animation:uavspin 26s linear infinite}
+  @keyframes uavspin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion: reduce){ .uavring{animation:none} }
+  /* laser designator: the lased-position square on the grid pulses
+     gently while it shows so the accurate correction stands out */
+  .laserring{transform-box:fill-box; transform-origin:center; animation:laserpulse 2.2s ease-in-out infinite}
+  @keyframes laserpulse{0%,100%{opacity:.95}50%{opacity:.4}}
+  @media (prefers-reduced-motion: reduce){ .laserring{animation:none} }
+  .gtreload{font-size:.82rem; color:#ffb52e; min-height:1.1em; margin-top:5px; text-align:center}
+  /* shell / magazine strip: sits between FIRE and Next target */
+  .gameammo{
+    background:var(--inset); border:1px solid var(--line-soft); border-radius:8px;
+    padding:9px 12px; color:var(--on-inset); margin-top:10px;
+  }
+  .gameammo .gtrow{margin-top:0}
+  /* ammo box: EVERYTHING centred, stacked top to bottom —
+     "AMMO — M1 · HE" label on top, the count / reloading line
+     under it, and the shell round circles (pips) at the BOTTOM,
+     under the label. The old side-by-side row spilled past the
+     right edge and left the label / pips / count scattered
+     left and right; a centred column can never overflow. */
+  .gameammo{text-align:center}
+  .gameammo .gtrow{flex-direction:column; flex-wrap:nowrap; align-items:center; justify-content:center; gap:4px; text-align:center}
+  .gameammo .gtlab{width:auto; flex:none; white-space:nowrap; text-align:center; order:1}
+  .gameammo .gtval{min-width:0; flex:none; margin-left:0; text-align:center; white-space:normal; order:2}
+  .gameammo .ammopips{flex:none; min-width:0; display:block; text-align:center; order:3; line-height:1.2}
+  .gamehelpbody b{letter-spacing:.03em}
+  .gamewho{font-size:.86rem; letter-spacing:.1em; font-weight:700; text-align:center; margin-bottom:4px}
+  /* the in-game sight dial lives inside the firing solution panel,
+     in its own column on the LEFT of the IN RANGE → bearing readouts:
+     dial left, the status / elevation / range / bearing stack right */
+  .firinglayout{display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap}
+  .firingdial{flex:0 1 308px; min-width:min(308px, 100%)}
+  .firingmain{flex:1 1 264px; min-width:min(264px, 100%)}
+  .dialsection h3{margin:0 0 8px; font-size:1rem; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-dim)}
+  .gameread{margin-top:12px; border-top:1px solid var(--line-soft); padding-top:10px}
+  svg#gameDial{display:block; width:100%; height:auto}
+  .dialtick{font-family:"IBM Plex Mono", monospace; font-weight:600; fill:var(--board-label)}
+  /* compass strip at the BOTTOM of the elevation dial, like the
+     in-game compass tape: degree numbers + cardinal marks slide
+     past a fixed small hollow triangle at the centre; the solid
+     triangle on the tape is the line to the target — turn the
+     mortar with A / D until the solid triangle lines up under
+     the small hollow one and the arrow on the mortar icon points
+     straight down the target line */
+  .compassbox{margin-top:10px; border-top:1px solid var(--line-soft); padding-top:8px}
+  .compassbox h4{margin:0 0 4px; font-size:.92rem; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-dim)}
+  svg#gameCompassStrip{display:block; width:100%; height:auto}
+  .compassread{display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; font-family:"IBM Plex Mono", monospace; font-size:.8rem; color:var(--ink-dim); margin-top:5px}
+  .compassread b{color:var(--ink)}
+  .compassstatus{margin-top:6px; border:1px solid var(--line-soft); border-radius:6px; padding:5px 8px; text-align:center; font-weight:700; font-size:.92rem; background:var(--panel2); color:var(--ink-dim)}
+  .compassstatus.on{border-color:var(--green); color:var(--green)}
+  @media (min-width:901px){
+    /* firing panel leaves room below itself for the collapsed About panel */
+    #panel{max-height:calc(100dvh - 150px)}
+  }
+  @media (max-width:900px){
+    /* stacked defaults so no panel covers another at phone width;
+       each panel scrolls internally and can be dragged anywhere */
+    #topPanel{max-height:24dvh}
+    #panel{top:calc(24dvh + 24px); max-height:35dvh}
+    #controlsPanel{max-height:33dvh}
+    #infoPanel{display:none}
+    #infoPanel.open{display:flex}
+  }
+
+  /* ---------- top bar : map selector (inside floating panel) ---------- */
+  .topbar{
+    display:flex; flex-wrap:wrap; gap:10px; align-items:stretch;
+  }
+  .mapsel{display:flex; flex-direction:column; gap:2px; flex:1 1 260px; min-width:220px}
+  .mapsel label{font-size:.82rem; letter-spacing:.14em; font-weight:600; color:var(--ink-dim); text-transform:uppercase}
+  .mapsel select{
+    width:100%; padding:6px 10px; border-radius:6px; cursor:pointer;
+    background:var(--panel2); color:var(--ink); border:1px solid var(--line);
+    font-family:"IBM Plex Mono", monospace; font-size:1rem; font-weight:600;
+  }
+  .chips{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+  .chip{
+    background:var(--chip); border:1px solid var(--line-soft); border-radius:6px;
+    padding:7px 10px; font-family:"IBM Plex Mono", monospace; font-size:.86rem; white-space:nowrap;
+  }
+  .chip b{color:var(--amber); font-weight:700}
+
+  /* ---------- floating panel headers (drag handles) ---------- */
+  .panelhead{
+    /* static top bar: fixed flex row at the panel top (never part of
+       the scrolling body), also sticky as a fallback — it stays put
+       while .panelbody scrolls underneath it */
+    flex:none; position:sticky; top:0; z-index:10;
+    background:var(--panel);
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    margin:-2px -2px 12px; padding:7px 9px; border:1px dashed var(--line-soft); border-radius:7px;
+    cursor:grab; touch-action:none; user-select:none; -webkit-user-select:none;
+  }
+  .panelhead:active{cursor:grabbing}
+  .ph-title{font-size:.86rem; letter-spacing:.14em; font-weight:700; color:var(--ink-dim); text-transform:uppercase}
+  .ph-title .grip{color:var(--ink-faint); letter-spacing:.1em}
+  .dockbtn{
+    border:1px solid var(--line); background:var(--panel2); color:var(--ink);
+    border-radius:6px; padding:2px 10px; cursor:pointer; font-weight:600; min-height:2rem; font-size:.92rem; flex:none;
+  }
+  .headbtns{display:flex; gap:6px; flex:none; align-items:center}
+
+  /* ---------- mode toolbar ---------- */
+  .toolbar{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px}
+  .seg{display:flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; flex:1 1 260px}
+  /* Two-mortar state: the segment gains PLACE MORTAR 2 + PLACE
+     TARGET 2, and four buttons at their natural (min-content) width
+     overflowed the segment's flex box — PLACE TARGET 2 spilled out
+     and the Remove Mortar 2 button painted over it. In that state
+     the segment takes its OWN full toolbar row and wraps 2 x 2, so
+     every place button gets a wide, non-overlapping box. */
+  .toolbar.has-m2 .seg{flex:1 1 100%; flex-wrap:wrap; gap:1px; background:var(--line)}
+  .toolbar.has-m2 .seg button{flex:1 1 160px}
+  .seg button{
+    flex:1; min-width:0; border:0; cursor:pointer; padding:8px 10px; min-height:2.75rem;
+    background:var(--panel2); color:var(--ink-dim); font-weight:700; letter-spacing:.06em; font-size:1.02rem;
+    display:flex; align-items:center; justify-content:center; gap:8px;
+  }
+  .seg button .dot{width:11px;height:11px;border-radius:50%;flex:none}
+  .seg button[data-mode="mortar"] .dot{background:var(--mortar)}
+  .seg button[data-mode="mortar2"] .dot{background:var(--mortar2)}
+  .seg button[data-mode="target"] .dot{background:var(--target)}
+  .seg button[data-mode="target2"] .dot{background:var(--target2)}
+  .seg button.active{background:var(--inset); color:var(--on-inset); box-shadow:inset 0 0 0 2px var(--amber-dim)}
+  .seg button.active[data-mode="mortar2"]{box-shadow:inset 0 0 0 2px var(--mortar2)}
+  .seg button.active[data-mode="target"]{box-shadow:inset 0 0 0 2px var(--target)}
+  .seg button.active[data-mode="target2"]{box-shadow:inset 0 0 0 2px var(--target2)}
+  .toolbtn{
+    border:1px solid var(--line); background:var(--panel2); color:var(--ink);
+    border-radius:8px; padding:8px 14px; cursor:pointer; font-weight:600; letter-spacing:.05em; min-height:2.75rem;
+  }
+  .toolbtn:active{transform:translateY(1px)}
+  .toolbtn.locked{background:var(--inset); color:var(--on-inset); box-shadow:inset 0 0 0 2px var(--amber-dim)}
+  .toolbtn.locked[data-lock="m2"]{box-shadow:inset 0 0 0 2px var(--mortar2)}
+  .toolbtn.locked[data-lock="target"]{box-shadow:inset 0 0 0 2px var(--target)}
+  .toolbtn.locked[data-lock="target2"]{box-shadow:inset 0 0 0 2px var(--target2)}
+  #subdivBtn[aria-pressed="true"]{background:var(--inset); color:var(--on-inset); box-shadow:inset 0 0 0 2px var(--amber-dim)}
+  .zoombtn{font-family:"IBM Plex Mono", monospace; font-size:1.25rem; font-weight:700; min-width:2.9rem; padding:8px 10px; line-height:1}
+  .zoombtn:disabled{opacity:.38; cursor:default}
+  .zoombtn:disabled:active{transform:none}
+  #zoomLabel{font-family:"IBM Plex Mono", monospace; font-size:.9rem; color:var(--ink-dim); align-self:center; min-width:3.2em; text-align:center}
+  .hint{font-size:.95rem; color:var(--ink-dim); margin:0 0 10px; line-height:1.35}
+  .hint b{color:var(--ink)}
+
+  /* ---------- board : full-screen background ---------- */
+  .boardwrap{position:absolute; inset:0; background:var(--board-bg)}
+  svg#board{display:block; width:100%; height:100%; touch-action:none; user-select:none; -webkit-user-select:none; cursor:crosshair}
+  /* shown only when the map photo file (assets/maps/…) can't be loaded —
+     e.g. a downloaded copy opened without its assets folder beside it */
+  #mapImgWarn{
+    position:absolute; left:50%; bottom:14px; transform:translateX(-50%);
+    z-index:30; max-width:min(92vw, 560px); text-align:center;
+    background:#7e1d16; color:#fff; border:1px solid #a52a20; border-radius:8px;
+    padding:9px 14px; font-size:1rem; line-height:1.35; letter-spacing:.02em;
+    box-shadow:0 10px 26px rgba(0,0,0,.5);
+  }
+  #mapImgWarn[hidden]{display:none}
+  .hintdetails{margin-top:2px}
+  .hintdetails summary{cursor:pointer; font-weight:700; letter-spacing:.08em; color:var(--ink-dim); padding:4px 0; font-size:.95rem}
+  .hintdetails .hint{max-height:38vh; overflow-y:auto; padding-right:4px}
+  .blabel{font-family:"IBM Plex Mono", monospace; font-weight:600; fill:var(--board-label)}
+  .cellref{font-family:"IBM Plex Mono", monospace; fill:var(--board-label); opacity:.55}
+
+  /* ---------- readout panel ---------- */
+  .status{
+    border-radius:8px; padding:10px 12px; text-align:center; font-weight:700;
+    letter-spacing:.18em; font-size:1.15rem; border:1px solid var(--line); margin-bottom:12px;
+    background:var(--inset); color:#5fd06e;
+  }
+  .status.out{color:#fff; background:#7e1d16; border-color:#a52a20}
+  .status.close{color:#ff8a3c}
+  .lcd{
+    background:var(--inset); border:1px solid var(--line-soft); border-radius:8px; padding:12px; color:var(--on-inset);
+  }
+  .lcd .lab{font-size:.8rem; letter-spacing:.16em; color:var(--on-inset-faint); font-weight:600; text-transform:uppercase}
+  .lcd .big{
+    font-family:"IBM Plex Mono", monospace; font-weight:700; color:#ffb52e;
+    font-size:2.6rem; line-height:1.05; letter-spacing:.02em;
+  }
+  .lcd .big small{font-size:1.1rem; color:var(--on-inset-dim); font-weight:500}
+  .lcd.out .big{color:#ff5a4e}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:10px}
+  .mini{background:var(--inset); border:1px solid var(--line-soft); border-radius:8px; padding:9px 11px; color:var(--on-inset)}
+  .mini .lab{font-size:.76rem; letter-spacing:.14em; color:var(--on-inset-faint); font-weight:600; text-transform:uppercase}
+  .mini .val{font-family:"IBM Plex Mono", monospace; font-weight:700; font-size:1.42rem; line-height:1.15}
+  .mini .sub{font-family:"IBM Plex Mono", monospace; font-size:.84rem; color:var(--on-inset-dim)}
+  .enter-val{color:#ffb52e}
+
+  table.kv{width:100%; border-collapse:collapse; margin-top:12px; font-size:1rem}
+  table.kv td{padding:6px 2px; border-top:1px solid var(--line-soft); vertical-align:top}
+  table.kv td.k{color:var(--ink-dim); letter-spacing:.05em; font-weight:600; width:42%}
+  table.kv td.v{font-family:"IBM Plex Mono", monospace; font-weight:600; text-align:right}
+  .mcol{color:var(--mortar)} .m2col{color:var(--mortar2)} .tcol{color:var(--target)} .t2col{color:var(--target2)}
+  #dualBox{margin-top:10px}
+  #dualBox .val{font-family:"IBM Plex Mono", monospace; font-weight:700; font-size:1rem; line-height:1.5}
+
+  /* ---------- position inputs ---------- */
+  .posform{margin-top:14px; border-top:1px solid var(--line); padding-top:12px}
+  .posform h3, .rtable h3{margin:0 0 8px; font-size:1rem; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-dim)}
+  .field{display:flex; flex-direction:column; gap:3px; margin-bottom:10px}
+  .field label{font-size:.9rem; font-weight:600; letter-spacing:.06em}
+  .field label .tag{font-family:"IBM Plex Mono", monospace; font-weight:500; color:var(--ink-faint); font-size:.8rem}
+  .field input{
+    padding:7px 10px; border-radius:6px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--ink);
+    font-family:"IBM Plex Mono", monospace; font-size:1.05rem; font-weight:600; width:100%;
+  }
+  .field input:focus{outline:2px solid var(--amber-dim); outline-offset:0}
+  .field .err{color:var(--red); font-size:.86rem; font-family:"IBM Plex Mono", monospace; min-height:1em}
+  .hrow{display:flex; gap:10px; align-items:flex-end}
+  .hrow .field{flex:1; margin-bottom:0}
+  .note{font-size:.92rem; color:var(--ink-dim); line-height:1.4; margin:8px 0 0}
+
+  /* ---------- range table ---------- */
+  .rtable{margin-top:14px; border-top:1px solid var(--line); padding-top:12px}
+  .rtable table{width:100%; border-collapse:collapse; font-family:"IBM Plex Mono", monospace; font-size:.92rem}
+  .rtable th{color:var(--ink-faint); font-weight:600; text-align:right; padding:3px 6px; letter-spacing:.05em}
+  .rtable th:first-child{text-align:left}
+  .rtable td{padding:3px 6px; text-align:right; border-top:1px solid var(--line-soft)}
+  .rtable td:first-child{text-align:left; color:var(--ink-dim)}
+  .rtable tr.hl td{color:var(--amber); font-weight:700}
+
+  footer{color:var(--ink-faint); font-size:.92rem; line-height:1.5}
+  footer a{color:var(--ink-dim)}
+  footer .panelhead{margin-bottom:8px}
+  footer h3{margin:12px 0 5px; font-size:.92rem; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-dim)}
+  footer .credits{margin:0; padding-left:1.15em}
+  footer .credits li{margin-bottom:5px}
+  footer .credits b{color:var(--ink-dim)}
+
+  /* ---------- SMALL SCREENS — compact scale (general, not one size) ----------
+     On a big monitor the panels above are roomy; on a small laptop
+     (1366x768 and similar), a tablet, or any short / narrow window
+     they covered too much map and needed constant scrolling. Below
+     ~1440px wide OR ~860px tall the whole UI steps down one size:
+     narrower panels, tighter padding, smaller dials, type and
+     controls — so the map stays visible and each panel fits its
+     height with little or no scrolling. Narrower / shorter screens
+     step down again. The Mini Game status card stays docked at
+     the top left at each step; only its width shrinks so it never
+     runs under the shrunken game panel. */
+  @media (max-width:1440px), (max-height:860px){
+    button, select, input{min-height:2.2rem}
+    .float-panel{border-radius:8px}
+    .panelhead{margin:-2px -2px 8px; padding:5px 7px}
+    .ph-title{font-size:.78rem}
+    .collapsebtn{min-height:1.8rem; padding:1px 7px}
+    .dockbtn{min-height:1.8rem; padding:1px 8px; font-size:.85rem}
+    #topPanel{width:min(400px, calc(100vw - 24px)); padding:8px 10px}
+    #controlsPanel{width:min(480px, calc(100vw - 24px)); padding:9px}
+    #panel{width:min(540px, calc(100vw - 24px)); padding:9px}
+    #infoPanel{width:min(300px, calc(100vw - 24px)); padding:8px 10px; font-size:.84rem}
+    #gamePanel{width:min(360px, calc(100vw - 24px)); padding:9px}
+    #gameInfoPanel{width:min(520px, calc(100vw - 24px))}
+    #gameTargetBox{left:12px; width:min(520px, calc(100vw - 396px)); padding:7px 10px}
+    .gamerange .big{font-size:1.5rem}
+    .gamerange .lab{font-size:.66rem}
+    .gtlabel{font-size:.9rem}
+    .summarybtn{font-size:.74rem; min-height:1.6rem; padding:1px 7px}
+    .gtdesc{font-size:.7rem}
+    .gtrow{margin-top:4px; gap:7px}
+    .barwrap{height:10px}
+    .chips{gap:6px}
+    .chip{padding:5px 7px; font-size:.78rem}
+    .mapsel label{font-size:.74rem}
+    .mapsel select{padding:4px 8px; font-size:.92rem}
+    .toolbar{gap:6px; margin-bottom:7px}
+    .seg button{min-height:2.3rem; padding:6px 7px; font-size:.94rem}
+    .toolbtn{padding:6px 10px; min-height:2.3rem; font-size:.92rem}
+    .zoombtn{min-width:2.5rem; font-size:1.1rem; padding:6px 8px}
+    .hint{font-size:.88rem; margin-bottom:7px}
+    .status{padding:7px 9px; font-size:1rem; margin-bottom:8px}
+    .lcd{padding:9px}
+    .lcd .big{font-size:2rem}
+    .lcd .lab{font-size:.72rem}
+    .grid2{gap:7px; margin-top:7px}
+    .mini{padding:7px 9px}
+    .mini .val{font-size:1.18rem}
+    .mini .lab{font-size:.68rem}
+    .mini .sub{font-size:.76rem}
+    table.kv{font-size:.92rem; margin-top:8px}
+    table.kv td{padding:4px 2px}
+    .posform{margin-top:10px; padding-top:8px}
+    .posform h3, .rtable h3{font-size:.9rem; margin-bottom:6px}
+    .field{margin-bottom:7px}
+    .field input{padding:5px 8px; font-size:.96rem}
+    .field label{font-size:.84rem}
+    .note{font-size:.85rem; margin-top:6px}
+    .rtable{margin-top:10px; padding-top:8px}
+    .rtable table{font-size:.84rem}
+    .firinglayout{gap:10px}
+    .firingdial{flex:0 1 240px; min-width:min(240px, 100%)}
+    .firingmain{flex:1 1 230px; min-width:min(230px, 100%)}
+    .dialsection h3{font-size:.9rem; margin-bottom:5px}
+    .gameread{margin-top:8px; padding-top:7px}
+    .gamewho{font-size:.78rem}
+    .gameaim{font-size:.88rem; margin-bottom:6px}
+    .gamehelp{margin-bottom:8px}
+    .gamehelp summary{padding:6px 9px; font-size:.86rem}
+    .gamecalc{padding:8px 9px; margin-bottom:8px}
+    .calcrow{margin-top:6px; gap:7px}
+    .calcrow input{padding:5px 8px; font-size:1rem}
+    .calcresult .cval{font-size:1.1rem}
+    svg#trainDial{max-width:240px}
+    .wsrow{gap:7px; margin-top:7px}
+    .wsbtn{min-height:2.7rem; font-size:.95rem}
+    .firebtn{min-height:2.5rem; font-size:1rem; margin-top:7px}
+    .nextbtn{min-height:2.3rem; margin-top:6px}
+    .reloadbtn{min-height:2.5rem; font-size:1rem; margin-top:6px}
+    .skipbatchbtn{min-height:2.2rem; font-size:.88rem}
+    .gameammo{padding:7px 10px; margin-top:7px}
+    .gamefeedback{font-size:.92rem; padding:7px 9px; margin-top:7px; min-height:2.2em}
+    .gamescore{font-size:.82rem; margin-top:6px}
+  }
+  @media (max-height:800px) and (min-width:901px){
+    /* short windows (e.g. 768px tall): cap panel heights so nothing
+       runs off the bottom, and shrink the dials a step further */
+    #panel{max-height:calc(100dvh - 110px)}
+    #controlsPanel{max-height:42dvh}
+    #topPanel{max-height:26dvh}
+    svg#trainDial{max-width:205px}
+    .firingdial{flex-basis:205px; min-width:min(205px, 100%)}
+    .lcd .big{font-size:1.8rem}
+  }
+  @media (max-width:1100px) and (min-width:901px){
+    #topPanel{width:min(360px, calc(100vw - 24px))}
+    #controlsPanel{width:min(440px, calc(100vw - 24px))}
+    #panel{width:min(480px, calc(100vw - 24px))}
+    #gamePanel{width:min(340px, calc(100vw - 24px))}
+    #gameTargetBox{left:12px; width:min(480px, calc(100vw - 376px))}
+    .firingdial{flex-basis:215px; min-width:min(215px, 100%)}
+    svg#trainDial{max-width:215px}
+  }
+  @media (max-width:900px){
+    /* phones / very narrow: keep the compact scale, panels span the
+       width but stay short, dials small enough to fit without scroll */
+    svg#trainDial{max-width:200px}
+    .gamerange .big{font-size:1.35rem}
+    .wsbtn{min-height:2.5rem}
+    /* the game panel spans the width here; the status card stays
+       docked top-left across the width above it */
+    #gameTargetBox{left:12px; width:calc(100vw - 24px); padding:7px 9px}
+  }
+
+  /* ---------- SPLIT LAYOUT while the Mini Game is open ----------
+     The docked game panel used to sit ON TOP of the map's right
+     side, covering the grid. Now, while the game is open, the
+     stage becomes a two-column grid instead: the map keeps its
+     OWN column on the left (framed as its own tile), and the
+     game panel gets its OWN column on the right, so the panel
+     never covers the grid any more. The Target status card is
+     NOT part of that right column — it stays where it always
+     was, docked at the top left over the map. The floating
+     panels that normally overlay the map (Map selector, Firing
+     solution, About) are hidden while the game is open, and the
+     minimized Controls header stays at the bottom left of the
+     map column. Closing the game removes body.game-open and the
+     map goes back to filling the whole stage. On phones the
+     split stacks instead: map on top (status card docked at its
+     top left), game panel filling the rest below. */
+  body.game-open .wrap{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) min(430px, 44vw);
+    grid-template-rows:minmax(0,1fr);
+  }
+  body.game-open .maplayer{
+    position:relative; inset:auto; z-index:0;
+    grid-column:1; grid-row:1;
+    min-width:0; min-height:0;
+    margin:12px 0 12px 12px;
+    border:1px solid var(--line); border-radius:10px; overflow:hidden;
+  }
+  /* Target status card: REVERTED to its original spot — docked at
+     the TOP LEFT over the map (the base #gameTargetBox /
+     #gameTargetShowBtn absolute rules above), NOT in the right-hand
+     game column where the split layout briefly put it. The game
+     panel now fills the whole right column on its own. */
+  body.game-open #gameTargetBox{
+    max-height:calc(100dvh - 24px); overflow-y:auto;
+  }
+  body.game-open #gamePanel{
+    position:relative; top:auto; right:auto; left:auto;
+    grid-column:2; grid-row:1;
+    width:auto; margin:12px 12px 12px 10px;
+    max-height:none; min-height:0;
+  }
+  /* centre the Summary & How it works panel over the MAP column,
+     not over the whole stage (which now includes the game column) */
+  body.game-open #gameInfoPanel{left:calc((100% - min(430px, 44vw) - 22px) / 2)}
+  @media (max-width:1440px), (max-height:860px){
+    body.game-open .wrap{grid-template-columns:minmax(0,1fr) min(360px, 44vw)}
+    body.game-open #gameInfoPanel{left:calc((100% - min(360px, 44vw) - 22px) / 2)}
+  }
+  @media (max-width:1100px) and (min-width:901px){
+    body.game-open .wrap{grid-template-columns:minmax(0,1fr) min(340px, 44vw)}
+    body.game-open #gameInfoPanel{left:calc((100% - min(340px, 44vw) - 22px) / 2)}
+  }
+  @media (max-width:900px){
+    /* phones: the split stacks — map tile on top with the status
+       card docked at its top left, game panel filling the rest below */
+    body.game-open .wrap{
+      grid-template-columns:minmax(0,1fr);
+      grid-template-rows:minmax(190px, 36dvh) minmax(0,1fr);
+    }
+    body.game-open .maplayer{grid-column:1; grid-row:1; margin:12px 12px 0}
+    /* status card stays docked top-left over the map tile (base
+       absolute rules), capped so it never covers the whole tile */
+    body.game-open #gameTargetBox{max-height:34dvh}
+    body.game-open #gamePanel, body.game-open.card-hidden #gamePanel{
+      grid-column:1; grid-row:2; top:auto; max-height:none; margin:10px 12px 12px;
+    }
+    body.game-open #gameInfoPanel{left:50%}
+  }
