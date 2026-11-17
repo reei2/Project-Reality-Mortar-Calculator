@@ -49,14 +49,16 @@ function targetFor(idx){ return (idx === 1 && target2) ? target2 : target; }   /
 var currentMap = MAPS.filter(function(m){ return m[0] === "Kokan"; })[0];
 /* Mini Game — dial training state (declared early: marker transforms read it) */
 var game = { active: false, fired: false, over: false, range: 0, correctMils: 0, playerMils: 1200, dials: [1200, 1200],
-             round: 1, shots: 0, hits: 0, streak: 0, targetFrac: null,
+             round: 1, shots: 0, hits: 0, bonus: 0, streak: 0, bestStreak: 0, targetFrac: null,
              type: null, hp: 0, maxHp: 0, timeLeft: 0, timeMax: 0, velM: null,
              defenders: [], defSquads: [], vehicles: [], emplacements: [],
              infMen: [], vehTgt: [], vehCount: 0,
              smokeTimed: false, smokeSquad: [], smokeSquadLabelEl: null,
              dcFriendlies: [], dcEnemySquads: [], dcElapsed: 0, infHalted: false,
              markDx: 0, markDy: 0, markSrc: null, spotterDx: 0, spotterDy: 0, revealed: false, laserShown: false, lastImpact: null, lastImpacts: [null, null],
+             spotterCompromised: false, spotterFate: null, spotterShots: 0, spotterRiskAt: Infinity,
              uavFuel: 0, uavState: null,
+             checkUsed: false, check: null, checkShown: false, checkedFrac: null,
              ammo: 5, reloading: false, flying: false, cooldown: false,
              shell: "he", ammoStore: [{ he: 5, smoke: 5 }, { he: 5, smoke: 5 }] };
 /* per-mortar, per-shell ammo: EVERY mortar carries its OWN magazine
@@ -491,9 +493,7 @@ function vehicleTargetText(){
      a shell lands within INF_KILL_M of that man — the same 14 m
      a defending man falls at. The target is down only when
      EVERY man is down; the status card counts men, not HP.
-   - VEHICLE, MOVING: each vehicle is destroyed only by a shell
-     landing within the type's kill radius of THAT vehicle.
-   - VEHICLE, STATIONARY: each vehicle has its OWN HP pool (the
+   - VEHICLE (always stationary): each vehicle has its OWN HP pool (the
      type's HP, per vehicle) and takes its own graded
      50 / 25 / 10 damage from the shell's distance to that
      vehicle. The target is down only when every vehicle is
@@ -705,6 +705,61 @@ function dangerCloseText(){
     " vs " + game.dcEnemySquads.length + " enemy squads" +
     " (" + eSizes.join(" + ") + ") — " + eMen + (eMen === 1 ? " man" : " men") + " closing in.";
 }
+/* ================= DANGER CLOSE — THE ONE COORDINATE THE SQUAD CALLS =================
+   The pinned squad gives the mortars exactly ONE thing: a single
+   coordinate to shoot. They do not give a range, a bearing or a
+   correction — just the grid ref of the ONE enemy squad they want
+   hit first. WHICH squad that is depends on HOW MANY enemy squads
+   they are facing (counted live, squads still up):
+   - facing 2 squads: the NEAREST one — the closest is the
+     immediate threat.
+   - facing 3 or more: the LARGEST one (most men still up, ties
+     broken by nearest) — the biggest squad bleeds them fastest.
+   - facing 1 (the last one standing): that one.
+   The call is worked out live (dcCallTarget), so the status card
+   always shows the current call: as squads press in the ref moves
+   with the called squad, and when the called squad is wiped the
+   call switches to the next squad by the same rule. And Ask
+   spotter on this mission is just as limited: the pinned squad
+   only confirms whether the selected mortar's last round landed
+   in the RIGHT PLACE or NOT — no metres, no add / drop, no
+   left / right (see askSpotter's danger-close branch). */
+function dcCallTarget(){
+  if (!game.targetFrac || !game.dcEnemySquads || !game.dcEnemySquads.length) return null;
+  var B = boardMeters(); if (!B) return null;
+  var alive = [], i, j;
+  for (i = 0; i < game.dcEnemySquads.length; i++){
+    var sq = game.dcEnemySquads[i], men = 0;
+    for (j = 0; j < sq.men.length; j++) if (sq.men[j].alive) men++;
+    if (!men) continue;
+    var cen = dcSquadCentre(sq);
+    alive.push({ idx: i, men: men, cx: cen.x, cy: cen.y, dist: Math.hypot(cen.x, cen.y) });
+  }
+  if (!alive.length) return null;
+  var count = alive.length, pick = null, why = "";
+  if (count === 1){
+    pick = alive[0]; why = "the last squad still up";
+  } else if (count === 2){
+    pick = alive[0];
+    for (i = 1; i < alive.length; i++) if (alive[i].dist < pick.dist) pick = alive[i];
+    why = "nearest first — facing only 2 squads, the closest is the immediate threat";
+  } else {
+    pick = alive[0];
+    for (i = 1; i < alive.length; i++)
+      if (alive[i].men > pick.men || (alive[i].men === pick.men && alive[i].dist < pick.dist)) pick = alive[i];
+    why = "largest first — facing " + count + " squads, the biggest bleeds them fastest";
+  }
+  var frac = { x: game.targetFrac.x + pick.cx / B, y: game.targetFrac.y + pick.cy / B };
+  return { idx: pick.idx, count: count, men: pick.men, ref: fracToRef(frac).compact, why: why };
+}
+function dcCallText(){
+  var c = dcCallTarget();
+  if (!c) return "";
+  return "The pinned squad calls ONE coordinate to shoot: " + c.ref +
+    " — enemy squad " + (c.idx + 1) + " (" + c.men + (c.men === 1 ? " man" : " men") + " up, " + c.why + ")." +
+    " The coordinate they call depends on how many enemy squads they are facing: 2 squads → the nearest one, 3 or more → the largest one, the last one standing → that one." +
+    " That coordinate is all they give — no range and no correction — and Ask spotter on this mission only tells you whether a round landed in the right place or not.";
+}
 /* switch the game target's look for this round's type: scattered
    dots for infantry, 1–3 vehicle icons for a vehicle target, the
    orange diamond otherwise */
@@ -712,7 +767,7 @@ function setGameTargetVisual(type){
   if (!gameTgtParts.diamond) return;
   var id = type ? type.id : "";
   var isInf = id === "infantry" || id === "infantryHold";
-  var isVeh = id === "vehicleMove" || id === "vehicleStatic";
+  var isVeh = id === "vehicleStatic";
   var isSmoke = id === "smoke";
   if (isInf) scatterInfantryTarget();   /* fresh scatter every round */
   else { game.infSquads = []; clearInfantryTarget(); }
@@ -832,20 +887,48 @@ var gameTrueG = el("g", {style:"display:none;pointer-events:none"}, gDyn);
    they only report the fall of shot after every shell dropped. */
 var gameSpotterLine = el("line", {stroke:"var(--green)", "stroke-width":1.4, "stroke-dasharray":"4 4", opacity:.55, style:"display:none;pointer-events:none"}, gDyn);
 var gameLaserG = el("g", {style:"display:none;pointer-events:none"}, gDyn);
+var spotterParts = {};
 (function buildSpotterBadge(){
   /* friendly spotter figure: head with binoculars raised to the
      eyes, shoulders below — in friendly green, labelled so the
-     player knows the man 50–150 m off the target is theirs */
-  el("circle", {r:12, fill:"var(--inset)", stroke:"var(--green)", "stroke-width":1.8}, gameLaserG);
+     player knows the man off the target is theirs. This ONE
+     figure is the icon for EVERY ground spotter who gets an
+     icon: the laser designator spotter, the sniper team's
+     spotter and the REGULAR INFANTRY spotter all use it exactly
+     as drawn here — only the label beside it (set by
+     tintSpotter) and his distance from the target differ. When
+     the enemy spots him the figure is re-tinted: red with a
+     cross when he is killed, orange when he has fled. */
+  spotterParts.ring = el("circle", {r:12, fill:"var(--inset)", stroke:"var(--green)", "stroke-width":1.8}, gameLaserG);
   var b = el("g", {stroke:"var(--green)", "stroke-width":1.5, fill:"none", "stroke-linecap":"round"}, gameLaserG);
+  spotterParts.figure = b;
   el("circle", {cx:0, cy:-3.6, r:3.4}, b);                 /* head */
   el("path", {d:"M -6.5 7.5 A 7 7 0 0 1 6.5 7.5"}, b);    /* shoulders */
   var lens = el("g", {fill:"var(--green)", stroke:"none"}, gameLaserG);
+  spotterParts.lens = lens;
   el("circle", {cx:-2.5, cy:-3.8, r:1.6}, lens);           /* binocular lenses over the eyes */
   el("circle", {cx:2.5, cy:-3.8, r:1.6}, lens);
+  var cross = el("g", {stroke:"var(--red)", "stroke-width":2.2, "stroke-linecap":"round", style:"display:none"}, gameLaserG);
+  spotterParts.cross = cross;
+  el("line", {x1:-7, y1:-7, x2:7, y2:7}, cross);
+  el("line", {x1:-7, y1:7, x2:7, y2:-7}, cross);
   var t = el("text", {x:15, y:4, "font-size":10.5, "font-weight":700, fill:"var(--green)", "font-family":"'IBM Plex Mono',monospace"}, gameLaserG);
+  spotterParts.label = t;
   t.textContent = "FRIENDLY SPOTTER";
 })();
+function tintSpotter(){
+  if (!spotterParts.ring) return;
+  var col = "var(--green)", label = spotterIconLabel(game.markSrc);
+  if (game.spotterCompromised && game.spotterFate === "killed"){ col = "var(--red)"; label = "SPOTTER DOWN"; }
+  else if (game.spotterCompromised && game.spotterFate === "fled"){ col = "var(--orange)"; label = "SPOTTER FLED"; }
+  spotterParts.ring.setAttribute("stroke", col);
+  spotterParts.figure.setAttribute("stroke", col);
+  spotterParts.lens.setAttribute("fill", col);
+  spotterParts.label.setAttribute("fill", col);
+  spotterParts.label.textContent = label;
+  spotterParts.cross.style.display = (game.spotterCompromised && game.spotterFate === "killed") ? "" : "none";
+  gameLaserG.setAttribute("opacity", game.spotterCompromised && game.spotterFate === "killed" ? .8 : 1);
+}
 var gameLasedLine = el("line", {stroke:"var(--target2)", "stroke-width":1.6, "stroke-dasharray":"5 4", style:"display:none;pointer-events:none"}, gDyn);
 var gameLasedG = el("g", {style:"display:none;pointer-events:none"}, gDyn);
 (function buildLasedMarker(){
@@ -873,6 +956,90 @@ function showLasedTemporarily(){
     game.laserShown = false;
     updateMarkerTransforms();
   }, LASER_SHOW_MS);
+  updateMarkerTransforms();
+}
+
+/* CHECK ON MARK — the checker on the grid + the checked position.
+   On a SQUAD MARK / PASSING SQUAD round there is no spotter to
+   ask, so the player can REQUEST A CHECK ON THE MARK instead
+   (see CHECK ON MARK below): a checker — commander UAV, an
+   infantry squad on foot, or a vehicle driving in, rolled fresh
+   per request — starts FAR AWAY on the grid and travels to the
+   mark (game.check.curFrac, stepped by the check timer), drawn
+   here as a friendly-green icon that changes with the kind: the
+   drone badge for the UAV, the same friendly spotter figure as
+   every ground spotter for the infantry squad, and a truck
+   silhouette for the vehicle. A faint dashed line joins it to
+   the mark while it travels. On arrival it reports the CHECKED
+   target position: an amber diamond with a centre dot at the
+   checked spot (CHECKED POSITION), with a dashed line back to
+   the orange mark — shown only TEMPORARILY, like the lased
+   square, then it fades. It is NOT the Skip reveal: the round
+   stays live and the marker is amber / CHECKED, not green /
+   TRUE POSITION. */
+var gameCheckLine = el("line", {stroke:"var(--amber)", "stroke-width":1.4, "stroke-dasharray":"4 4", opacity:.55, style:"display:none;pointer-events:none"}, gDyn);
+var gameCheckG = el("g", {style:"display:none;pointer-events:none"}, gDyn);
+var checkParts = {};
+(function buildCheckMarker(){
+  var uav = el("g", {}, gameCheckG); checkParts.uav = uav;
+  el("circle", {r:11, fill:"var(--inset)", stroke:"var(--green)", "stroke-width":1.8}, uav);
+  var d = el("g", {stroke:"var(--green)", "stroke-width":1.6, "stroke-linecap":"round", fill:"none"}, uav);
+  el("line", {x1:-5.5, y1:-5.5, x2:5.5, y2:5.5}, d);
+  el("line", {x1:-5.5, y1:5.5, x2:5.5, y2:-5.5}, d);
+  var rc = [[-5.5,-5.5],[5.5,-5.5],[-5.5,5.5],[5.5,5.5]];
+  for (var i = 0; i < rc.length; i++) el("circle", {cx:rc[i][0], cy:rc[i][1], r:2.7}, d);
+  el("circle", {r:2.3, fill:"var(--green)", stroke:"none"}, uav);
+  var inf = el("g", {style:"display:none"}, gameCheckG); checkParts.infantry = inf;
+  el("circle", {r:12, fill:"var(--inset)", stroke:"var(--green)", "stroke-width":1.8}, inf);
+  var b = el("g", {stroke:"var(--green)", "stroke-width":1.5, fill:"none", "stroke-linecap":"round"}, inf);
+  el("circle", {cx:0, cy:-3.6, r:3.4}, b);                 /* head */
+  el("path", {d:"M -6.5 7.5 A 7 7 0 0 1 6.5 7.5"}, b);    /* shoulders */
+  var lens = el("g", {fill:"var(--green)", stroke:"none"}, inf);
+  el("circle", {cx:-2.5, cy:-3.8, r:1.6}, lens);           /* binocular lenses over the eyes — the same friendly spotter figure */
+  el("circle", {cx:2.5, cy:-3.8, r:1.6}, lens);
+  var veh = el("g", {style:"display:none"}, gameCheckG); checkParts.vehicle = veh;
+  el("rect", {x:-13, y:-6.5, width:26, height:13, rx:2, fill:"var(--inset)", stroke:"var(--green)", "stroke-width":2}, veh);
+  el("rect", {x:5.5, y:-6.5, width:7.5, height:13, fill:"var(--green)", opacity:.38}, veh);
+  el("line", {x1:-10, y1:0, x2:4, y2:0, stroke:"var(--green)", "stroke-width":1, opacity:.65}, veh);
+  var t = el("text", {x:16, y:4, "font-size":10.5, "font-weight":700, fill:"var(--green)", "font-family":"'IBM Plex Mono',monospace"}, gameCheckG);
+  checkParts.label = t;
+  t.textContent = "CHECKING MARK";
+})();
+function setCheckIcon(kindId){
+  if (!checkParts.uav) return;
+  checkParts.uav.style.display = kindId === "uav" ? "" : "none";
+  checkParts.infantry.style.display = kindId === "infantry" ? "" : "none";
+  checkParts.vehicle.style.display = kindId === "vehicle" ? "" : "none";
+  checkParts.label.textContent = kindId === "uav" ? "UAV — CHECKING MARK"
+    : kindId === "vehicle" ? "VEHICLE — CHECKING MARK" : "INFANTRY — CHECKING MARK";
+}
+var gameCheckedLine = el("line", {stroke:"var(--amber)", "stroke-width":1.6, "stroke-dasharray":"5 4", style:"display:none;pointer-events:none"}, gDyn);
+var gameCheckedG = el("g", {style:"display:none;pointer-events:none"}, gDyn);
+(function buildCheckedMarker(){
+  /* the checked position itself: an amber DIAMOND with a centre
+     dot — distinct from the cyan lased square and the green
+     TRUE POSITION marker. It only SHOWS TEMPORARILY
+     (CHECK_SHOW_MS in showCheckedTemporarily): the check is a
+     report you act on, then it fades and the mark is yours. */
+  el("polygon", {points:"0,-15 11,0 0,15 -11,0", fill:"none", stroke:"var(--amber)", "stroke-width":2.4}, gameCheckedG);
+  el("polygon", {points:"0,-8.5 6,0 0,8.5 -6,0", fill:"none", stroke:"var(--amber)", "stroke-width":1.2, opacity:.65}, gameCheckedG);
+  el("circle", {r:3.2, fill:"var(--amber)", stroke:"none"}, gameCheckedG);
+  var t = el("text", {y:-22, "text-anchor":"middle", "font-size":11, "font-weight":700, fill:"var(--amber)", "font-family":"'IBM Plex Mono',monospace"}, gameCheckedG);
+  t.textContent = "CHECKED POSITION";
+})();
+/* the checked diamond is TEMPORARY: it shows for CHECK_SHOW_MS
+   after the checker arrives, then this timer takes it off again */
+var CHECK_SHOW_MS = 10000;   /* 10 seconds the checked position stays on the grid */
+var checkedTimer = null;
+function clearCheckedTimer(){ if (checkedTimer){ clearTimeout(checkedTimer); checkedTimer = null; } }
+function showCheckedTemporarily(){
+  clearCheckedTimer();
+  game.checkShown = true;
+  checkedTimer = setTimeout(function(){
+    checkedTimer = null;
+    game.checkShown = false;
+    updateMarkerTransforms();
+  }, CHECK_SHOW_MS);
   updateMarkerTransforms();
 }
 
@@ -998,15 +1165,23 @@ function updateMarkerTransforms(){
       gameUavG.setAttribute("transform", "translate(" + gp.x + "," + gp.y + ") scale(" + k + ")");
       gameUavG.style.display = "";
     } else gameUavG.style.display = "none";
-    /* friendly spotter (laser designator source): he does NOT sit
-       on the mark — his icon stands at his own ground position,
-       game.spotterDx / spotterDy metres from the mark (50–150 m,
-       rolled in rollMark), converted through THIS map's ground
-       scale (Bm0), so the on-screen gap depends on the map. If his
-       rolled spot would fall off the board, he takes the mirrored
-       bearing instead; the faint dashed line joins him to the
-       mark he is lasing. */
-    if (game.active && game.markSrc && game.markSrc.id === "laser"){
+    /* ground spotter with an icon (laser / sniper / REGULAR
+       INFANTRY — all three share the SAME friendly spotter
+       figure, see buildSpotterBadge): he does NOT sit on the
+       mark — his icon stands at his own ground position,
+       game.spotterDx / spotterDy metres from the mark (distance
+       rolled per source in rollMark), converted through THIS
+       map's ground scale (Bm0), so the on-screen gap depends on
+       the map. If his rolled spot would fall off the board, he
+       takes the mirrored bearing instead; the faint dashed line
+       joins him to the mark he is watching — until the enemy
+       spots him: a killed spotter keeps his icon where he fell
+       (red, crossed, SPOTTER DOWN) and a fled spotter's icon
+       sits at the ground he ran to (orange, SPOTTER FLED), and
+       the line is gone either way, because he is not watching
+       the target any more. */
+    if (game.active && hasSpotterIcon(game.markSrc)){
+      tintSpotter();
       var sfx, sfy;
       if (Bm0 > 0){
         sfx = mf.x + (game.spotterDx || 0) / Bm0; sfy = mf.y + (game.spotterDy || 0) / Bm0;
@@ -1016,11 +1191,13 @@ function updateMarkerTransforms(){
       var sp = fracToPx({x:sfx, y:sfy});
       gameLaserG.setAttribute("transform", "translate(" + sp.x + "," + sp.y + ") scale(" + k + ")");
       gameLaserG.style.display = "";
-      gameSpotterLine.setAttribute("x1", sp.x); gameSpotterLine.setAttribute("y1", sp.y);
-      gameSpotterLine.setAttribute("x2", gp.x); gameSpotterLine.setAttribute("y2", gp.y);
-      gameSpotterLine.setAttribute("stroke-width", 1.4 * k);
-      gameSpotterLine.setAttribute("stroke-dasharray", (4 * k) + " " + (4 * k));
-      gameSpotterLine.style.display = "";
+      if (!game.spotterCompromised){
+        gameSpotterLine.setAttribute("x1", sp.x); gameSpotterLine.setAttribute("y1", sp.y);
+        gameSpotterLine.setAttribute("x2", gp.x); gameSpotterLine.setAttribute("y2", gp.y);
+        gameSpotterLine.setAttribute("stroke-width", 1.4 * k);
+        gameSpotterLine.setAttribute("stroke-dasharray", (4 * k) + " " + (4 * k));
+        gameSpotterLine.style.display = "";
+      } else gameSpotterLine.style.display = "none";
     } else { gameLaserG.style.display = "none"; gameSpotterLine.style.display = "none"; }
     /* lased correction on the grid: after Ask spotter on a laser
        round, the accurate lased position (the true position) is
@@ -1038,6 +1215,44 @@ function updateMarkerTransforms(){
     } else {
       gameLasedG.style.display = "none";
       gameLasedLine.style.display = "none";
+    }
+    /* check on mark: the checker (UAV / infantry / vehicle) rides
+       at its CURRENT ground position — far away when the request
+       goes in, walking / driving / flying to the mark as the
+       check timer steps game.check.curFrac — at constant
+       on-screen size like the other markers, with a faint dashed
+       line to the mark while it is still travelling. Once it has
+       arrived it stays standing short of the mark for the rest
+       of the round. */
+    if (game.active && game.check && game.check.curFrac){
+      var cpk = fracToPx(game.check.curFrac);
+      gameCheckG.setAttribute("transform", "translate(" + cpk.x + "," + cpk.y + ") scale(" + k + ")");
+      gameCheckG.style.display = "";
+      if (game.check.phase === "travel"){
+        gameCheckLine.setAttribute("x1", cpk.x); gameCheckLine.setAttribute("y1", cpk.y);
+        gameCheckLine.setAttribute("x2", gp.x); gameCheckLine.setAttribute("y2", gp.y);
+        gameCheckLine.setAttribute("stroke-width", 1.4 * k);
+        gameCheckLine.setAttribute("stroke-dasharray", (4 * k) + " " + (4 * k));
+        gameCheckLine.style.display = "";
+      } else gameCheckLine.style.display = "none";
+    } else { gameCheckG.style.display = "none"; gameCheckLine.style.display = "none"; }
+    /* checked position: after the checker arrives, the checked
+       spot is drawn in amber at the checked position (the true
+       position rounded to the checker's precision) with a dashed
+       line back to the orange mark. Hidden once Skip target
+       reveals the true position itself. */
+    if (game.checkShown && !game.revealed && game.checkedFrac){
+      var cpChecked = fracToPx(game.checkedFrac);
+      gameCheckedG.setAttribute("transform", "translate(" + cpChecked.x + "," + cpChecked.y + ") scale(" + k + ")");
+      gameCheckedG.style.display = "";
+      gameCheckedLine.setAttribute("x1", gp.x); gameCheckedLine.setAttribute("y1", gp.y);
+      gameCheckedLine.setAttribute("x2", cpChecked.x); gameCheckedLine.setAttribute("y2", cpChecked.y);
+      gameCheckedLine.setAttribute("stroke-width", 1.6 * k);
+      gameCheckedLine.setAttribute("stroke-dasharray", (5 * k) + " " + (4 * k));
+      gameCheckedLine.style.display = "";
+    } else {
+      gameCheckedG.style.display = "none";
+      gameCheckedLine.style.display = "none";
     }
     /* Skip-target reveal: the green TRUE POSITION marker sits at the
        REAL target (no mark error) and the dashed line joins it back
@@ -1195,7 +1410,7 @@ function updateMarkerTransforms(){
     } else gameEmpG.style.display = "none";
     /* hit rings stay HIDDEN — no visible hit radius, like in game */
     gameRingsG.style.display = "none";
-  } else { gameRingsG.style.display = "none"; gameEmpG.style.display = "none"; gameTrueG.style.display = "none"; gameTrueLine.style.display = "none"; gameUavG.style.display = "none"; gameLaserG.style.display = "none"; gameSpotterLine.style.display = "none"; gameLasedG.style.display = "none"; gameLasedLine.style.display = "none"; gameInfG.style.display = "none"; gameVehTgtG.style.display = "none"; gameSmokeSquadG.style.display = "none"; gameDcFriendG.style.display = "none"; gameDcEnemyG.style.display = "none"; }
+  } else { gameRingsG.style.display = "none"; gameEmpG.style.display = "none"; gameTrueG.style.display = "none"; gameTrueLine.style.display = "none"; gameUavG.style.display = "none"; gameLaserG.style.display = "none"; gameSpotterLine.style.display = "none"; gameLasedG.style.display = "none"; gameLasedLine.style.display = "none"; gameCheckG.style.display = "none"; gameCheckLine.style.display = "none"; gameCheckedG.style.display = "none"; gameCheckedLine.style.display = "none"; gameInfG.style.display = "none"; gameVehTgtG.style.display = "none"; gameSmokeSquadG.style.display = "none"; gameDcFriendG.style.display = "none"; gameDcEnemyG.style.display = "none"; }
 }
 /* one-line summary of a mortar's solution, for the both-mortars box */
 function dualText(idx){
@@ -2219,8 +2434,11 @@ function updateTrainDial(){
   if (typeof updateCompass === "function") updateCompass();
 }
 function gameScoreText(){
-  $("gameScore").innerHTML = "ROUND <b>" + game.round + "</b> · TARGETS DOWN <b>" + game.hits + "</b> · ROUNDS FIRED <b>" +
+  if (game.streak > game.bestStreak) game.bestStreak = game.streak;   /* best streak is part of the shareable stats */
+  $("gameScore").innerHTML = "ROUND <b>" + game.round + "</b> · TARGETS DOWN <b>" + game.hits + "</b>" +
+    (game.bonus ? " · BONUS <b>+" + game.bonus + "</b>" : "") + " · ROUNDS FIRED <b>" +
     game.shots + "</b> · STREAK <b>" + game.streak + "</b>";
+  if (typeof updateSharePreview === "function") updateSharePreview();
 }
 function setGameFeedback(cls, html){
   var fb = $("gameFeedback");
@@ -2259,18 +2477,20 @@ function rangeForMils(mils){
   return MAX_RANGE * Math.sin(2 * th);
 }
 /* ================= TARGET TYPES — timeout vs health =================
-   Moving targets (Infantry, moving Vehicle) run on a TIMEOUT: they
-   keep moving on the board, the range hint changes with them, and the
+   The only moving target is Infantry, which runs on a TIMEOUT: it
+   keeps moving on the board, the range hint changes with it, and the
    round is lost when the timer empties. Moving Infantry gets a LONG
    timeout (60 s) and a slow on-foot speed, so it stays in play far
-   longer before it moves off. Hard targets (Cache, FOB / Hideout,
-   the four Emplacements, stationary Vehicle — and Infantry HOLDING
-   a flag / building, a stationary infantry variant that never moves,
-   drifts or escapes) have HEALTH instead: no timer, but one round
-   won't destroy them — damage grades 50 / 25 / 10 HP by hit band
-   inside that target's own blast rings. The magazine holds 5 rounds,
-   like in game; a reload loads 2 shells at a time, every 2 shells
-   taking 5–10 s. */
+   longer before it moves off. Vehicles are always STATIONARY — there
+   is no moving-vehicle target (it was pure guesswork to dial against
+   a target that kept driving off while you set up). Hard targets
+   (Cache, FOB / Hideout, the four Emplacements, stationary Vehicle —
+   and Infantry HOLDING a flag / building, a stationary infantry
+   variant that never moves, drifts or escapes) have HEALTH instead:
+   no timer, but one round won't destroy them — damage grades
+   50 / 25 / 10 HP by hit band inside that target's own blast rings.
+   The magazine holds 5 rounds, like in game; a reload loads
+   2 shells at a time, every 2 shells taking 5–10 s. */
 /* Dynamic hit variants: there is NO single hit distance. Every
    type carries its own rings in metres — direct (full effect) /
    close / blast (outer edge) — but they are HIDDEN: never drawn
@@ -2281,8 +2501,8 @@ function rangeForMils(mils){
    tight rings; a squad or a vehicle covers a little more ground.
    Timed targets also carry `kill`: the radius that actually takes
    them down (infantry in the open die anywhere inside their blast
-   ring; a moving vehicle must be caught inside its close ring).
-   Hard targets take graded damage inside the blast: 50 / 25 / 10 HP. */
+   ring). Hard targets take graded damage inside the blast:
+   50 / 25 / 10 HP. */
 /* Dynamic FOB, like in game: the forward base depends on the
    faction. Conventional forces — BLUFOR and REDFOR alike
    (Russia / MEC / China) — always build a FOB; insurgent forces
@@ -2301,18 +2521,15 @@ var GAME_TYPES = [
   { id:"infantryHold", short:"INFANTRY", label:"INFANTRY — HOLDING", category:"health", hp:50,
     direct:8, close:14, blast:22,
     desc:"Holding, scattered, no shared health — each man falls only to a round close to him." },
-  { id:"vehicleMove", short:"VEHICLE", label:"VEHICLE — MOVING", category:"timed", time:18, speed:8,
-    direct:7, close:13, blast:20, kill:13,
-    desc:"1–3 vehicles, each on its own — only a near-direct hit on that vehicle kills it." },
   { id:"cache", short:"CACHE", label:"WEAPON CACHE", category:"health", hp:100,
     direct:4, close:8, blast:14,
-    desc:"Weapon box, tight rings. 100 HP · 50/25/10 per band." },
+    desc:"Weapon box, tight rings. 100 HP · 50/25/10 per band. The Cache itself is the primary target — destroy it and the mission is done. Its defenders and parked vehicles are BONUS only: each one destroyed counts +1 targets down, but none of them ends the mission — only the Cache does." },
   { id:"fob", short:"FOB", label:"FOB — CONVENTIONAL", category:"health", hp:150,
     direct:5, close:10, blast:16,
-    desc:"FOB, tight rings. 150 HP · 50/25/10 per band." },
+    desc:"FOB, tight rings. 150 HP · 50/25/10 per band. The FOB itself is the primary target — destroy it and the mission is done. Its emplacements, defenders and parked vehicles are BONUS only: each one destroyed counts +1 targets down, but none of them ends the mission — only the FOB does." },
   { id:"hideout", short:"HIDEOUT", label:"HIDEOUT — INSURGENCY", category:"health", hp:100,
     direct:4, close:8, blast:14,
-    desc:"Hideout, tight rings. 100 HP · 50/25/10 per band." },
+    desc:"Hideout, tight rings. 100 HP · 50/25/10 per band. The Hideout itself is the primary target — destroy it and the mission is done. Its emplacements, defenders and parked vehicles are BONUS only: each one destroyed counts +1 targets down, but none of them ends the mission — only the Hideout does." },
   { id:"vehicleStatic", short:"VEHICLE", label:"VEHICLE — STATIONARY", category:"health", hp:100,
     direct:6, close:12, blast:19,
     desc:"1–3 parked vehicles, own 100 HP each · 50/25/10 per band." },
@@ -2348,7 +2565,7 @@ var GAME_TYPES = [
      friendly damage uses its own bands. */
   { id:"dangerClose", short:"DANGER CLOSE", label:"DANGER CLOSE — SURROUNDED", category:"dangerclose",
     direct:8, close:14, blast:22,
-    desc:"Friendlies (green) surrounded by enemy (orange). Friendlies 100 HP, bleed 0.02 HP/s per enemy man up. An enemy squad hit by a round stops closing in. Kill all enemy — keep rounds off the green." }
+    desc:"Friendlies (green) surrounded by enemy (orange). Friendlies 100 HP, bleed 0.02 HP/s per enemy man up. An enemy squad hit by a round stops closing in. Kill all enemy — keep rounds off the green. The pinned squad calls ONE coordinate to shoot, picked by how many enemy squads they face (2 → nearest, 3+ → largest), and Ask spotter only confirms right place or not." }
 ];
 /* ================= MARK ACCURACY — VARIED BY SOURCE =================
    The orange diamond is only a mark on the map, and in game a mark
@@ -2361,7 +2578,8 @@ var GAME_TYPES = [
      sky on the UAV feed (realitymod.org manual, Commander → UAV)
      and marks what he sees — a tight mark, a few metres off.
    - SQUAD MARK: a squad on the ground spotted it and marked it —
-     a fair mark, can sit a good way off.
+     a fair mark, can sit a good way off. Nobody is left watching
+     the fall of shot, so Ask spotter is DISABLED on a squad mark.
    - FRIENDLY SPOTTER — LASER DESIGNATOR: sometimes (rolled fresh
      every round, like the other sources) the mark is from a
      friendly spotter carrying laser designator
@@ -2374,14 +2592,36 @@ var GAME_TYPES = [
      a correction he lases it again and the accurate lased
      position is SHOWN ON THE GRID MAP as a square with a centre
      dot (cyan LASED mark, see askSpotter / gameLasedG) — and only
-     TEMPORARILY, for a few seconds, before it fades. Sources without a laser — a
-     regular squad, a passing squad, regular infantry — get no
-     lased mark on the grid, but they still report the fall of
+     TEMPORARILY, for a few seconds, before it fades. Sources without a laser get no
+     lased mark on the grid, but the dedicated spotters (sniper,
+     regular infantry, UAV) still report the fall of
      shot after EVERY shell dropped (the post-shot feedback)
-     and still answer Ask spotter in metres as before.
+     and still answer Ask spotter in metres as before. A SQUAD
+     MARK or PASSING SQUAD mark is the exception: nobody is
+     watching, so Ask spotter is disabled for those two sources.
+   - SNIPER TEAM — SPOTTING SCOPE: a sniper team's spotter, well
+     back (90–200 m) on a scope — a tight mark, tight corrections,
+     no laser. He uses the SAME friendly spotter icon.
+   - REGULAR INFANTRY — BINOCULARS: a regular infantryman with
+     ordinary binoculars — a fair mark, corrections to the
+     nearest 15 m, no laser. He uses the SAME friendly spotter
+     icon as the laser spotter (40–110 m from the target), only
+     his label reads REGULAR INFANTRY SPOTTER.
    - PASSING SQUAD: a squad just passing stumbled onto it and
      called it in roughly, or it was found by accident — the
-     roughest mark, can be well off the real target.
+     roughest mark, can be well off the real target. That squad
+     has moved on, so Ask spotter is DISABLED on a passing mark.
+   SQUAD MARK and PASSING SQUAD rounds instead get REQUEST
+   CHECK ON MARK: a varied checker (commander UAV / infantry
+   squad on foot / vehicle driving in) comes in from far away
+   and checks the mark from a standoff — the ground checkers
+   stop well short of it, only the UAV goes over it — and
+   reports the checked target position, once per round (see
+   CHECK ON MARK below).
+   And ANY ground spotter can be SPOTTED BY THE ENEMY as the
+   round goes on — killed where he sits, or forced to run away
+   from the target to survive — and then he gives no corrections
+   for the rest of the round (see SPOTTER SPOTTED below).
    Whatever the source, the mark is NEVER more than 50 m from
    the true position (MARK_MAX_OFF_M) — the passing squad's
    roughest roll is capped at 50 m.
@@ -2390,15 +2630,42 @@ var GAME_TYPES = [
    at their true spots, so a rough mark can sit visibly off the
    position — walk the rounds in from the fall of shot. */
 var MARK_SOURCES = [
-  { id:"laser",   label:"FRIENDLY SPOTTER — LASER DESIGNATOR",  max:5, w:3,
+  { id:"laser",   label:"FRIENDLY SPOTTER — LASER DESIGNATOR",  max:5, w:3, icon:true, distMin:50, distMax:150,
     note:"friendly spotter lasing with designator binoculars — his green icon stands 50–150 m from the target on the grid (real ground metres, so the gap depends on the map). Accurate mark, and Ask spotter puts the lased position on the grid." },
+  { id:"sniper",  label:"SNIPER TEAM — SPOTTING SCOPE",  max:10, w:2, icon:true, distMin:90, distMax:200,
+    note:"a sniper team's spotter on a scope, well back — his green icon (same friendly spotter figure) stands 90–200 m from the target on the grid. Tight mark, tight corrections, but no laser: no lased position on the grid." },
   { id:"uav",     label:"COMMANDER UAV",  max:15, w:3,
     note:"tight mark from the UAV feed. Low fuel / RTB ends his corrections." },
+  { id:"infantry", label:"REGULAR INFANTRY — BINOCULARS",  max:30, w:4, icon:true, distMin:40, distMax:110,
+    note:"a regular infantryman spotting with ordinary binoculars — no laser. He gets the SAME green friendly spotter icon on the grid, 40–110 m from the target. Fair mark, corrections to the nearest 15 m, and no lased position on the grid." },
   { id:"squad",   label:"SQUAD MARK",     max:40, w:4,
-    note:"ground mark — can sit a fair way off." },
+    note:"ground mark — can sit a fair way off. No spotter watching the fall of shot, so Ask spotter is disabled on a squad mark — but you can Request check on mark instead: a varied checker (commander UAV, an infantry squad on foot, or a vehicle driving in) comes in from far away, stops short of the mark — only the UAV flies over it — and reports the checked target position, once per round. (Danger close excepted: there the pinned squad only calls one coordinate and confirms right place or not.)" },
   { id:"passing", label:"PASSING SQUAD",  max:50, w:3,
-    note:"rough mark — can be well off." }
+    note:"rough mark — can be well off. The passing squad has moved on, so Ask spotter is disabled on a passing-squad mark — but you can Request check on mark instead: a varied checker (commander UAV, an infantry squad on foot, or a vehicle driving in) comes in from far away, stops short of the mark — only the UAV flies over it — and reports the checked target position, once per round." }
 ];
+/* which sources are ONE man on the ground with eyes on the target —
+   he can be SPOTTED BY THE ENEMY (see SPOTTER SPOTTED below). The
+   UAV is in the sky and is lost to fuel instead, never to this. */
+function isGroundSpotterSrc(src){ return !!src && src.id !== "uav"; }
+/* marks with NO spotter to ask: a SQUAD MARK is just a mark a squad
+   dropped on the map and a PASSING SQUAD has already moved on —
+   neither is watching the fall of shot, so Ask spotter is DISABLED
+   for the whole round whenever the mark came from either source
+   (refreshGameControls keeps the button dead and askSpotter
+   refuses). Dedicated sources — laser, sniper, regular infantry
+   and the commander UAV — still correct as before. The ONE
+   exception is a DANGER CLOSE mission (its mark is a squad mark):
+   there the button stays live but the pinned squad only confirms
+   right place / not — the exception is applied at the call sites
+   (refreshGameControls / askSpotter), not in this helper. */
+function isNoSpotterMarkSrc(src){ return !!src && (src.id === "squad" || src.id === "passing"); }
+function hasSpotterIcon(src){ return !!src && !!src.icon; }
+function spotterIconLabel(src){
+  if (!src) return "FRIENDLY SPOTTER";
+  if (src.id === "infantry") return "REGULAR INFANTRY SPOTTER";
+  if (src.id === "sniper") return "SNIPER SPOTTER";
+  return "FRIENDLY SPOTTER";
+}
 /* hard cap: the true position is never more than 50 m from the mark,
    whatever the source — rollMark and the smoke / danger-close
    overrides all clamp to this */
@@ -2413,20 +2680,248 @@ function rollMark(){
   var a = Math.random() * Math.PI * 2;
   game.markDx = Math.cos(a) * dist;
   game.markDy = Math.sin(a) * dist;
-  /* friendly spotter (laser source only): he stands 50–150 m from
-     the target at a random bearing — never on the mark. Stored in
-     ground metres and converted through the selected map's scale
-     when drawn, so his on-screen distance from the target depends
-     on the map (see updateMarkerTransforms). */
-  if (src.id === "laser"){
-    var sd = 50 + Math.random() * 100, sa = Math.random() * Math.PI * 2;
+  /* ground spotter with an icon (laser / sniper / regular
+     infantry): he stands at HIS source's distance from the target
+     at a random bearing — never on the mark. Stored in ground
+     metres and converted through the selected map's scale when
+     drawn, so his on-screen distance from the target depends on
+     the map (see updateMarkerTransforms). Regular infantry uses
+     the SAME friendly spotter icon as the laser spotter — only
+     his label, distance and precision differ. */
+  if (hasSpotterIcon(src)){
+    var sd = src.distMin + Math.random() * (src.distMax - src.distMin), sa = Math.random() * Math.PI * 2;
     game.spotterDx = Math.cos(sa) * sd;
     game.spotterDy = Math.sin(sa) * sd;
   } else { game.spotterDx = 0; game.spotterDy = 0; }
+  resetSpotterRisk();
+}
+/* ================= SPOTTER SPOTTED — ENEMY EYES ON YOUR SPOTTER =================
+   A ground spotter is a man sitting still with binoculars up,
+   watching the target — and sometimes the enemy spots HIM.
+   Rolled fresh every round (resetSpotterRisk): in a bit under
+   half of ground-spotter rounds he is on borrowed time — after
+   2–4 landed rounds the enemy has him — and every Ask spotter
+   (radio call, and for the laser man a lase that can glint) also
+   carries a small chance of giving him away on the spot. When
+   he is spotted he is either KILLED where he sits or he RUNS —
+   he bolts away from the target to survive — and either way he
+   CANNOT give corrections any more this round: the Ask spotter
+   button dies (refreshGameControls / askSpotter), any lased
+   square comes off the grid, and his icon tells the story —
+   red SPOTTER DOWN where he fell, or orange SPOTTER FLED at the
+   ground he ran to, well away from the target. The UAV never
+   gets spotted this way: it is lost to fuel instead. Smoke
+   missions have no spotter and danger-close friendlies are
+   already the target, so neither rolls this. */
+var SPOTTER_SPOTTED_CHANCE = 0.45;   /* share of ground-spotter rounds where the enemy eventually spots him */
+var SPOTTER_ASK_RISK = 0.12;         /* chance each Ask spotter gives him away */
+function resetSpotterRisk(){
+  game.spotterCompromised = false;
+  game.spotterFate = null;
+  game.spotterShots = 0;
+  game.spotterRiskAt = (isGroundSpotterSrc(game.markSrc) && Math.random() < SPOTTER_SPOTTED_CHANCE)
+    ? 2 + Math.floor(Math.random() * 3)   /* spotted after 2–4 landed rounds */
+    : Infinity;
+}
+function compromiseSpotter(){
+  if (game.spotterCompromised) return game.spotterFate;
+  game.spotterCompromised = true;
+  game.spotterFate = Math.random() < 0.5 ? "killed" : "fled";
+  game.laserShown = false; clearLaserTimer();
+  if (game.spotterFate === "fled" && hasSpotterIcon(game.markSrc)){
+    /* he runs AWAY from the target along his own bearing, another
+       120–180 m out — updateMarkerTransforms draws him at the new
+       ground, mirrored back onto the board if he runs off its edge */
+    var d0 = Math.hypot(game.spotterDx || 0, game.spotterDy || 0) || 1;
+    var run = 120 + Math.random() * 60;
+    game.spotterDx = (game.spotterDx || 0) / d0 * (d0 + run);
+    game.spotterDy = (game.spotterDy || 0) / d0 * (d0 + run);
+  }
+  updateMarkerTransforms();
+  refreshGameControls();
+  return game.spotterFate;
+}
+function spotterFateText(){
+  return game.spotterFate === "killed"
+    ? "he was <b>killed where he sat</b> — his icon stays on the grid, marked SPOTTER DOWN"
+    : "he <b>ran for it</b> — bolted away from the target to survive, and his icon now sits where he ran to, marked SPOTTER FLED";
+}
+function spotterSpottedMsg(){
+  return "⚠️ <b>ENEMY SPOTTED YOUR SPOTTER</b> — " + spotterFateText() + ". <b>No more corrections this round</b>: walk the rounds in from the fall of shot yourself.";
+}
+/* after a round lands: count it against his exposure, and when
+   the rolled moment comes the enemy spots him — the warning is
+   APPENDED to the impact feedback so the fall of shot still reads */
+function maybeSpotterSpottedAfterShot(){
+  if (!game.active || game.over || game.spotterCompromised) return;
+  if (!isGroundSpotterSrc(game.markSrc)) return;
+  if (!game.type || game.type.id === "smoke" || game.type.id === "dangerClose") return;
+  game.spotterShots++;
+  if (game.spotterShots >= game.spotterRiskAt){
+    compromiseSpotter();
+    var fb = $("gameFeedback");
+    if (fb) fb.innerHTML += "<br><br>" + spotterSpottedMsg();
+  }
 }
 function markText(){
   if (!game.markSrc) return "";
   return "Mark: " + game.markSrc.label + " — " + game.markSrc.note;
+}
+/* ================= CHECK ON MARK — SQUAD / PASSING MARKS GET A CHECKER =================
+   A SQUAD MARK or PASSING SQUAD mark has nobody watching the
+   fall of shot, so Ask spotter is disabled on those rounds —
+   but the player can REQUEST A CHECK ON THE MARK instead: a
+   checker is sent FROM FAR AWAY to the mark to check the
+   target position, and WHO comes is VARIED, rolled fresh on
+   every request:
+   - COMMANDER UAV: the commander sends the UAV over — it flies
+     in from far off (the fastest check, ~3 s) and looks down on
+     the mark from the sky; the tightest check, good to the
+     nearest 5 m.
+   - VEHICLE: a vehicle crew drives in from far away (~6 s)
+     but stops 180 m short of the mark and checks the position
+     through binoculars from there; good to the nearest 10 m.
+   - INFANTRY: an infantry squad walks in from far away on foot
+     (the slowest check, ~9 s) but stops 120 m short of the mark
+     and checks the position through binoculars from there;
+     good to the nearest 15 m.
+   A ground checker NEVER comes right up to the mark: the mark
+   sits on or near an enemy target, and nobody walks or drives
+   onto a target just to look at it — ground checkers check
+   from a standoff (kind.stop), and only the UAV goes right
+   over the mark, from the sky. The checker's icon travels
+   across the grid from its far start (260–520 m out, rolled
+   per kind) to that stop point, so the player watches it come
+   in and halt short of the mark. On arrival it
+   REPORTS: how far the mark sits off the true target, the
+   bearing / compass direction of the true target FROM the
+   mark, and the CHECKED POSITION on the grid — an amber
+   diamond at the true position rounded to the checker's
+   precision step, shown temporarily (CHECK_SHOW_MS) like the
+   lased square. It is a check of the MARK, not a correction:
+   it needs no fall of shot, gives no range and no dial mils,
+   and it does not end or reveal the round (Skip still does
+   that). ONE check per round — sending someone across the map
+   is a big ask — and it is gone once used, whatever happens.
+   Only Squad Mark / Passing Squad rounds get the button
+   (refreshGameControls shows it only there): dedicated
+   spotter rounds already have Ask spotter, a smoke mission's
+   squad is advancing, not checking, and danger close keeps
+   its own limited right-place check. */
+var CHECK_KINDS = [
+  { id:"uav",      label:"COMMANDER UAV", who:"The commander UAV", verb:"flies in from far off and looks down on the mark from the sky", dur:3000, step:5,  w:2, fromMin:380, fromMax:520, stop:0 },
+  { id:"vehicle",  label:"VEHICLE CHECK", who:"A vehicle crew",    verb:"drives in from far away but stops 180 m short of the mark — a vehicle never drives right up onto a target — and checks the target position through binoculars from there", dur:6000, step:10, w:3, fromMin:300, fromMax:480, stop:180 },
+  { id:"infantry", label:"INFANTRY CHECK", who:"An infantry squad", verb:"walks in from far away on foot but stops 120 m short of the mark — infantry never walk right up onto a target to look at it — and checks the target position through binoculars from there", dur:9000, step:15, w:3, fromMin:260, fromMax:420, stop:120 }
+];
+function checkKindById(id){
+  for (var i = 0; i < CHECK_KINDS.length; i++) if (CHECK_KINDS[i].id === id) return CHECK_KINDS[i];
+  return CHECK_KINDS[0];
+}
+function isCheckMarkRound(){
+  return !!(game.active && isNoSpotterMarkSrc(game.markSrc) && game.type &&
+            game.type.id !== "smoke" && game.type.id !== "dangerClose");
+}
+function checkBriefNote(){
+  return isCheckMarkRound()
+    ? " No spotter is watching this mark, but you can <b>Request check on mark</b> once this round: a checker rolled fresh — <b>commander UAV</b> from the sky, an <b>infantry squad</b> on foot, or a <b>vehicle</b> driving in — comes in from far away and reports the checked target position. The ground checkers stop well short of the mark and check through binoculars — nobody walks or drives right up onto a target — and only the UAV goes over it."
+    : "";
+}
+var checkTimer = null;
+function clearCheckTimer(){ if (checkTimer){ clearInterval(checkTimer); checkTimer = null; } }
+function resetCheck(){
+  clearCheckTimer(); clearCheckedTimer();
+  game.check = null; game.checkUsed = false;
+  game.checkShown = false; game.checkedFrac = null;
+}
+function requestCheckOnMark(){
+  if (!game.active || game.over || !game.type) return;
+  if (!isCheckMarkRound()){
+    setGameFeedback("miss", "No check to request on this round — a check on the mark is only for a <b>Squad Mark</b> or <b>Passing Squad</b> mark, where nobody is watching. This round has its own spotter: use <b>Ask spotter</b>.");
+    return;
+  }
+  if (game.checkUsed){
+    setGameFeedback("near", game.check && game.check.phase === "travel"
+      ? "Check already on its way — <b>" + game.check.kind.label + "</b> is on its way in to check the mark. Wait for it to get into position and report."
+      : "This round's mark has already been checked — <b>one check per round</b>. Work from the checked position and the fall of shot.");
+    return;
+  }
+  game.checkUsed = true;
+  var tw = 0, i;
+  for (i = 0; i < CHECK_KINDS.length; i++) tw += CHECK_KINDS[i].w;
+  var r = Math.random() * tw, kind = CHECK_KINDS[0];
+  for (i = 0; i < CHECK_KINDS.length; i++){ r -= CHECK_KINDS[i].w; if (r <= 0){ kind = CHECK_KINDS[i]; break; } }
+  var B = boardMeters(), tp = posMeters(game.targetFrac);
+  var markM = { x: tp.x + (game.markDx || 0), y: tp.y + (game.markDy || 0) };
+  var a = Math.random() * Math.PI * 2;
+  var dist = kind.fromMin + Math.random() * (kind.fromMax - kind.fromMin);   /* far away: 260–520 m out, by kind */
+  var fromM = { x: markM.x + Math.cos(a) * dist, y: markM.y + Math.sin(a) * dist };
+  fromM.x = Math.min(B * .98, Math.max(B * .02, fromM.x));
+  fromM.y = Math.min(B * .98, Math.max(B * .02, fromM.y));
+  if (Math.hypot(fromM.x - markM.x, fromM.y - markM.y) < 80){   /* clamped start landed too close: come from the other side */
+    fromM.x = Math.min(B * .98, Math.max(B * .02, markM.x - Math.cos(a) * dist));
+    fromM.y = Math.min(B * .98, Math.max(B * .02, markM.y - Math.sin(a) * dist));
+  }
+  /* the stop point sits on the side the checker came from, at the
+     kind's STANDOFF from the mark (kind.stop): the UAV flies right
+     over the mark (stop 0), but a ground checker NEVER comes right
+     up to the mark / target — the vehicle halts 180 m short and
+     the infantry 120 m short and they check through binoculars
+     from there. The standoff is capped so a board-clamped start
+     can never push the stop past the checker's own start. */
+  var dxF = fromM.x - markM.x, dyF = fromM.y - markM.y;
+  var dFrom = Math.hypot(dxF, dyF) || 1;
+  var stopD = Math.min(kind.stop, Math.max(0, dFrom - 60));
+  var stopM = { x: markM.x + dxF / dFrom * stopD, y: markM.y + dyF / dFrom * stopD };
+  game.check = { kind: kind, phase: "travel", t0: Date.now(),
+                 dur: (typeof REDUCED !== "undefined" && REDUCED) ? 400 : kind.dur,
+                 fromM: fromM, toM: stopM, curFrac: { x: fromM.x / B, y: fromM.y / B } };
+  setCheckIcon(kind.id);
+  setGameFeedback("near", "📡 <b>CHECK ON MARK REQUESTED — " + kind.label + "</b>. " + kind.who + " " + kind.verb + " — watch the grid: its icon is coming in from far away, and when it is in position it will report the checked target position. <b>One check per round</b>, and Ask spotter stays disabled on a " + (game.markSrc.id === "passing" ? "Passing Squad" : "Squad") + " mark.");
+  refreshGameControls();
+  updateMarkerTransforms();
+  clearCheckTimer();
+  checkTimer = setInterval(tickCheck, 100);
+}
+function tickCheck(){
+  var c = game.check;
+  if (!game.active || !c || c.phase !== "travel"){ clearCheckTimer(); return; }
+  var t = Math.min(1, (Date.now() - c.t0) / c.dur);
+  var B = boardMeters();
+  var mx = c.fromM.x + (c.toM.x - c.fromM.x) * t, my = c.fromM.y + (c.toM.y - c.fromM.y) * t;
+  c.curFrac = { x: mx / B, y: my / B };
+  if (t >= 1){ clearCheckTimer(); finishCheck(); return; }
+  updateMarkerTransforms();
+}
+function finishCheck(){
+  var c = game.check;
+  if (!c) return;
+  c.phase = "done";
+  if (!game.active || game.over){ refreshGameControls(); updateMarkerTransforms(); return; }
+  var kind = c.kind, B = boardMeters();
+  /* the mark → true vector is the mark error reversed; the
+     checked position is the true position ROUNDED to this
+     checker's precision step, measured from the mark — a UAV
+     check is good to 5 m, a vehicle check to 10 m, infantry
+     on foot to 15 m */
+  var vx = -(game.markDx || 0), vy = -(game.markDy || 0);
+  var dist = Math.hypot(vx, vy);
+  var qx = Math.round(vx / kind.step) * kind.step, qy = Math.round(vy / kind.step) * kind.step;
+  var tp = posMeters(game.targetFrac);
+  var markM = { x: tp.x + (game.markDx || 0), y: tp.y + (game.markDy || 0) };
+  game.checkedFrac = { x: (markM.x + qx) / B, y: (markM.y + qy) / B };
+  showCheckedTemporarily();   /* amber CHECKED POSITION diamond on the grid, for a few seconds only */
+  var brg = (Math.atan2(vx, -vy) * 180 / Math.PI + 360) % 360;
+  var compass = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"][Math.round(brg / 45) % 8];
+  var arrived = kind.stop > 0
+    ? kind.who + " stopped " + kind.stop + " m short of the mark — it never goes right up to the target — and checked the target position through binoculars from there."
+    : kind.who + " is over the mark and checked the target position from the sky.";
+  setGameFeedback("near", "📡 <b>MARK CHECKED — " + kind.label + "</b>: " + arrived + " " +
+    (dist < kind.step
+      ? "The mark is <b>right on the target</b> — inside " + kind.step + " m, as close as this check can tell. Keep your mark where it is and walk the rounds in from the fall of shot."
+      : "The mark sits <b>" + fmt(Math.round(dist)) + " m off</b> — from the mark, the true target lies <b>" + compass + "</b> (bearing " + fmt(Math.round(brg)) + "° from the mark). The <b>checked position is on the grid now</b> (amber diamond, CHECKED POSITION) for a few seconds: move your target mark onto it and fire from there. This check is good to the nearest " + kind.step + " m.") +
+    " One check per round — that's it used.");
+  refreshGameControls();
+  updateMarkerTransforms();
 }
 /* ================= UAV FUEL — the commander UAV is not up forever =================
    Per the PR manual (Commander → UAV) the UAV burns fuel the
@@ -2436,14 +2931,17 @@ function markText(){
    the tank the UAV managed to refuel to between tasks (rolled
    50–95%), spends ~4 s travelling in at the travel rate, then
    drains at the operating rate while it watches. At 20% it is
-   LOW FUEL and at 0% it RTBs: from low fuel on, the commander is
-   losing his eyes and CANNOT call spotter corrections any more
-   this round — the Ask spotter button dies (see
-   refreshGameControls / askSpotter) and at RTB the ring around
-   the mark vanishes too. Targets called in by a squad or a
-   passing squad keep their spotter all round: their eyes are on
-   the ground and don't burn fuel. The status card carries a UAV
-   FUEL bar like the one on the commander screen (top left). */
+   LOW FUEL — but even on low fuel the commander UAV can still
+   see from the sky, so it KEEPS calling spotter corrections
+   while it is up there: low fuel is a warning, not the end.
+   Only at 0% does it RTB: then the commander has no eyes left
+   and CANNOT call spotter corrections any more this round —
+   the Ask spotter button dies (see refreshGameControls /
+   askSpotter) and the ring around the mark vanishes too.
+   Ground spotters don't burn fuel, but they can be spotted by
+   the enemy instead (see SPOTTER SPOTTED). The status card
+   carries a UAV FUEL bar like the one on the commander screen
+   (top left). */
 var uavTimer = null;
 var UAV_DRAIN_TRAVEL = 0.2;   /* % per second while travelling */
 var UAV_DRAIN_OPS = 0.33;     /* % per second while operating — and the refuel rate at base */
@@ -2471,7 +2969,7 @@ function startUav(){
         tintUav(); updateMarkerTransforms();
       } else if (game.uavState === "station" && game.uavFuel <= UAV_LOW_PCT){
         game.uavState = "low"; tintUav();
-        setGameFeedback("near", "UAV LOW FUEL — " + Math.round(game.uavFuel) + "% left and burning at 0.33%/s. The commander is losing his eyes: spotter corrections from the UAV stop here, and the ring around the mark goes when it RTBs.");
+        setGameFeedback("near", "UAV LOW FUEL — " + Math.round(game.uavFuel) + "% left and burning at 0.33%/s. He can still see from the sky up there, so the commander KEEPS calling corrections on low fuel — but when the tank hits 0% he RTBs and the corrections end, so spend them before then.");
       }
     }
     updateUavUI(); refreshGameControls();
@@ -2510,9 +3008,13 @@ function updateUavUI(){
    true spots, like the defenders and parked vehicles (the squads
    are around the position, not on the FOB itself). Each one has
    its own HP and takes graded damage inside its own hidden rings
-   (50 / 25 / 10 HP), and the position is only cleared once EVERY
-   emplacement is destroyed as well. Cache gets none — only the
-   forward base does. */
+   (50 / 25 / 10 HP). The structure itself is the PRIMARY target:
+   destroying it is target down and ends the mission, even if
+   emplacements are still up. Emplacements are BONUS only — each
+   one destroyed counts +1 targets down in the score, but no
+   emplacement (and nothing else around the position) ever ends
+   the mission while the structure stands. Cache gets none —
+   only the forward base does. */
 var EMPLACEMENT_VARIANTS = [
   { id:"tow",    short:"TOW",    label:"AT TOW",    hp:75,  direct:4, close:8, blast:13 },
   { id:"aa",     short:"MANPAD", label:"AA MANPAD", hp:50,  direct:4, close:7, blast:12 },
@@ -2612,8 +3114,11 @@ function makeEmplacements(type){
    all), with its men spread a few metres around the squad's spot.
    A shell that lands within DEF_KILL_M of a man takes that man
    down, wherever the shell lands relative to the structure. The
-   position only counts as cleared when the structure is at 0 HP
-   AND every defender is down. Moving / timed targets and plain
+   structure is the PRIMARY target — only it ends the mission.
+   Defenders are BONUS only: each man down counts +1 targets down
+   in the score, but clearing every defender (or everything else
+   around the position) never ends the mission while the
+   structure stands. Moving / timed targets and plain
    infantry / vehicle targets get no defenders — they ARE infantry
    or vehicles already. */
 var DEFENDED_IDS = { fob:1, hideout:1, cache:1 };
@@ -2663,9 +3168,13 @@ function makeDefenders(type){
    are different every round. A shell within a vehicle's own kill
    radius destroys it (truck 13 m, car / jeep 11 m); the row is
    tight (about 7 m between vehicles) so one round placed in the
-   middle of the row can take more than one. A FOB / Cache /
-   Hideout only counts as cleared when its parked vehicles are
-   destroyed as well as its structure and defenders. */
+   middle of the row can take more than one. The structure is
+   the PRIMARY target — only destroying it ends the mission.
+   Parked vehicles are BONUS only: each truck or car / jeep
+   destroyed counts +1 targets down in the score, but wiping
+   out every parked vehicle (or everything else around the
+   position) never ends the mission while the structure
+   stands. */
 var VEHICLE_GUARD_IDS = { fob:1, hideout:1, cache:1 };
 function vehiclesAlive(){
   var n = 0;
@@ -2806,14 +3315,25 @@ function refreshGameControls(){
   $("gameSkipBatchBtn").disabled = !isReloading(0);
   var sb2 = $("gameSkipBatch2Btn"); if (sb2) sb2.disabled = !isReloading(1);
   /* the spotter can only correct from a fall of shot: the button
-     wakes up once a round has actually landed this round — and a
-     commander UAV that is still en route, low on fuel or RTB has
-     no eyes to correct with, so for a commander-called target the
-     button stays dead in those states (its label says why).
-     Squad / passing-squad targets keep their spotter all round. */
+     wakes up once a round has actually landed this round. A
+     commander UAV still en route has no eyes yet and an RTB'd
+     UAV has none left, so the button stays dead in those two
+     states — but LOW FUEL is not one of them: even on low fuel
+     the UAV can still see from the sky, so it keeps correcting
+     until it actually RTBs. A ground spotter who has been
+     SPOTTED BY THE ENEMY (killed or fled) also leaves the
+     button dead for the rest of the round. A mark from a
+     PASSING SQUAD or a SQUAD MARK leaves it dead for the whole
+     round too: neither source is a spotter watching the fall of
+     shot. DANGER CLOSE is the one exception to that: its mark is
+     a squad mark, but the pinned squad stays on the radio for a
+     limited check — Ask spotter there only says whether the last
+     round landed in the right place or not. Labels say why. */
   var sb = $("gameSpotterBtn");
-  var uavOut = game.markSrc && game.markSrc.id === "uav" && game.uavState !== "station";
+  var uavOut = game.markSrc && game.markSrc.id === "uav" && game.uavState !== "station" && game.uavState !== "low";
   var smokeMission = game.type && game.type.id === "smoke";   /* no spotter correction on a smoke mission */
+  var dcMission = game.type && game.type.id === "dangerClose";   /* squad mark, but the limited right-place check stays live */
+  var noSpotterMark = isNoSpotterMarkSrc(game.markSrc) && !dcMission;   /* PASSING SQUAD / SQUAD MARK: Ask spotter disabled all round (danger close excepted) */
   /* the spotter corrects the SELECTED / ACTIVE mortar, from THAT
      mortar's OWN last landed round: the button is live only when
      the active mortar itself has a fall of shot this round — the
@@ -2821,16 +3341,46 @@ function refreshGameControls(){
      and its label names the mortar it will correct */
   var sAi = activeMortar();
   var sHas = !!lastImpactFor(sAi);
-  sb.disabled = !live || !sHas || !!uavOut || !!smokeMission;
+  sb.disabled = !live || !sHas || !!uavOut || !!smokeMission || !!game.spotterCompromised || !!noSpotterMark;
   sb.textContent = smokeMission ? "👁️ No spotter on a smoke mission"
+    : dcMission
+    ? "👁️ Ask spotter — pinned squad: right place or not · Mortar " + (sAi + 1) + (sHas ? "" : " (not fired yet)")
+    : noSpotterMark
+    ? (game.markSrc.id === "passing" ? "🚫 Ask spotter disabled — Passing Squad mark" : "🚫 Ask spotter disabled — Squad Mark")
+    : game.spotterCompromised
+    ? (game.spotterFate === "killed" ? "🚫 Spotter killed — no correction" : "🚫 Spotter fled — no correction")
     : (game.markSrc && game.markSrc.id === "uav")
     ? (game.uavState === "rtb" ? "👁️ UAV RTB — no spotter correction"
-      : game.uavState === "low" ? "👁️ UAV low fuel — no spotter correction"
       : game.uavState === "travel" ? "👁️ UAV en route — no spotter yet"
+      : game.uavState === "low" ? "👁️ Ask spotter — correct Mortar " + (sAi + 1) + " · UAV low fuel, still watching" + (sHas ? "" : " (not fired yet)")
       : "👁️ Ask spotter — correct Mortar " + (sAi + 1) + (sHas ? "" : " (not fired yet)"))
     : (game.markSrc && game.markSrc.id === "laser")
     ? "👁️ Ask spotter — laser designator · correct Mortar " + (sAi + 1) + (sHas ? "" : " (not fired yet)")
+    : (game.markSrc && game.markSrc.id === "infantry")
+    ? "👁️ Ask spotter — regular infantry · correct Mortar " + (sAi + 1) + (sHas ? "" : " (not fired yet)")
+    : (game.markSrc && game.markSrc.id === "sniper")
+    ? "👁️ Ask spotter — sniper team · correct Mortar " + (sAi + 1) + (sHas ? "" : " (not fired yet)")
     : "👁️ Ask spotter — correct Mortar " + (sAi + 1) + (sHas ? "" : " (not fired yet)");
+  /* REQUEST CHECK ON MARK — the Squad Mark / Passing Squad
+     rounds' own aid, sitting under Ask spotter: the button only
+     SHOWS on those rounds (dedicated-spotter rounds use Ask
+     spotter; smoke and danger close are excluded, see
+     isCheckMarkRound). It is live from the round's start — a
+     check of the mark needs no fall of shot — and dies once
+     used: while the checker travels it names who is coming,
+     and after the report it stays as the spent label. */
+  var cbk = $("gameCheckBtn");
+  if (cbk){
+    var checkRound = isNoSpotterMarkSrc(game.markSrc) && game.type && game.type.id !== "smoke" && game.type.id !== "dangerClose";
+    cbk.style.display = (game.active && checkRound) ? "" : "none";
+    var chk = game.check;
+    cbk.disabled = !live || !!game.checkUsed;
+    cbk.textContent = !game.checkUsed
+      ? "📡 Request check on mark — UAV / infantry / vehicle, once per round"
+      : (chk && chk.phase === "travel")
+      ? "📡 Check en route — " + chk.kind.label + " moving in to check the mark…"
+      : "✓ Mark checked — " + (chk ? chk.kind.label : "") + " · one per round, used";
+  }
 }
 function updateAmmoUI(){
   /* the pips show the SELECTED mortar's magazine for the SELECTED
@@ -2899,7 +3449,7 @@ function updateTargetStatus(){
   var sur = [emplacementText(), defendersText(), vehiclesText()].filter(function(x){ return x; }).join(" ");
   var scat = (t.id === "infantry" || t.id === "infantryHold") ? infantryScatterText() : "";
   var smokeNote = t.id === "smoke" ? smokeTimeoutText() : "";
-  var dcNote = t.id === "dangerClose" ? dangerCloseText() : "";
+  var dcNote = t.id === "dangerClose" ? (dangerCloseText() + " " + dcCallText()) : "";
   var _descText = markText() + " " + t.desc + (scat ? " " + scat : "") + (smokeNote ? " " + smokeNote : "") + (dcNote ? " " + dcNote : "") + (sur ? " " + sur : "");
   $("gameTypeDesc").textContent = _descText;
   var _dsc1 = $("gameTypeDescCard"); if (_dsc1) _dsc1.textContent = _descText;
@@ -3027,8 +3577,7 @@ function updateTargetStatus(){
   } else $("gameDefRow").style.display = "none";
   /* parked vehicles (FOB / Cache / Hideout): how many are still up.
      A VEHICLE TARGET reuses this row for its own 1–3 vehicles —
-     each with its own fate: a moving vehicle is simply up or
-     destroyed, a stationary one carries its own HP, listed per
+     each stationary vehicle carries its own HP, listed per
      vehicle on the detail line under the row */
   if (game.vehicles && game.vehicles.length){
     $("gameVehRow").style.display = "";
@@ -3039,23 +3588,18 @@ function updateTargetStatus(){
     }
     $("gameVehBar").style.width = (va2 / game.vehicles.length * 100) + "%";
     $("gameVehText").textContent = va2 + " / " + game.vehicles.length + " up · " + nTr2 + " truck · " + nCa2 + " car";
-  } else if (game.vehTgt && game.vehTgt.length && (t.id === "vehicleMove" || t.id === "vehicleStatic")){
+  } else if (game.vehTgt && game.vehTgt.length && t.id === "vehicleStatic"){
     $("gameVehRow").style.display = "";
     var vtUp = vehTargetAlive();
-    if (t.id === "vehicleStatic"){
-      var vtHp = 0, vtMax = 0, vtParts = [];
-      for (var vtx = 0; vtx < game.vehTgt.length; vtx++){
-        vtHp += game.vehTgt[vtx].hp; vtMax += game.vehTgt[vtx].maxHp;
-        vtParts.push("VEHICLE " + (vtx + 1) + " " + (game.vehTgt[vtx].hp > 0 ? game.vehTgt[vtx].hp + " HP" : "down"));
-      }
-      $("gameVehBar").style.width = (vtMax > 0 ? Math.max(0, vtHp / vtMax * 100) : 0) + "%";
-      $("gameVehText").textContent = vtUp + " / " + game.vehTgt.length + " up · own HP each";
-      var ved = $("gameEmpDetail");
-      if (ved){ ved.style.display = ""; ved.textContent = vtParts.join(" · "); }
-    } else {
-      $("gameVehBar").style.width = (vtUp / game.vehTgt.length * 100) + "%";
-      $("gameVehText").textContent = vtUp + " / " + game.vehTgt.length + " up";
+    var vtHp = 0, vtMax = 0, vtParts = [];
+    for (var vtx = 0; vtx < game.vehTgt.length; vtx++){
+      vtHp += game.vehTgt[vtx].hp; vtMax += game.vehTgt[vtx].maxHp;
+      vtParts.push("VEHICLE " + (vtx + 1) + " " + (game.vehTgt[vtx].hp > 0 ? game.vehTgt[vtx].hp + " HP" : "down"));
     }
+    $("gameVehBar").style.width = (vtMax > 0 ? Math.max(0, vtHp / vtMax * 100) : 0) + "%";
+    $("gameVehText").textContent = vtUp + " / " + game.vehTgt.length + " up · own HP each";
+    var ved = $("gameEmpDetail");
+    if (ved){ ved.style.display = ""; ved.textContent = vtParts.join(" · "); }
   } else $("gameVehRow").style.display = "none";
   updateUavUI();
 }
@@ -3286,6 +3830,7 @@ function newGameRound(){
   clearFireCooldown();
   shotSeq++; salvoSeq++; gameGen++; game.flying = false; hideFx();   /* any shell or salvo still going belongs to the old round */
   game.revealed = false; game.laserShown = false; clearLaserTimer(); clearLastImpacts();   /* fresh round: no reveal, no lased mark, no fall of shot to correct from yet — for either mortar */
+  resetCheck();   /* fresh round: no checker travelling, no checked mark, and the one check per round is unspent again */
   if (currentMap[1] === 0){
     game.active = false; game.targetFrac = null; game.type = null; game.defenders = []; game.defSquads = []; game.vehicles = [];
     game.emplacements = []; game.markSrc = null; game.markDx = 0; game.markDy = 0; game.spotterDx = 0; game.spotterDy = 0;
@@ -3398,13 +3943,25 @@ function newGameRound(){
     /* a danger-close mission is always the surrounded friendlies'
        own mark: they marked their own position and are calling
        the fire in themselves — a squad mark, never a commander
-       UAV, so no UAV ring / fuel overhead. Their leader stays on
-       the radio and CAN correct from the fall of shot (unlike a
-       smoke mission) — he is watching the rounds come in. */
+       UAV, so no UAV ring / fuel overhead. A squad mark normally
+       disables Ask spotter, but danger close is the ONE exception
+       — in a limited form: the pinned squad only calls ONE
+       coordinate to shoot (picked by how many enemy squads they
+       face, see dcCallTarget) and Ask spotter only confirms
+       whether a round landed in the right place or not — never a
+       metre correction (see askSpotter's danger-close branch). */
     var fSrc = MARK_SOURCES.filter(function(s){ return s.id === "squad"; })[0];
     game.markSrc = fSrc;
     var fDist = Math.min(fSrc.max, MARK_MAX_OFF_M) * Math.sqrt(Math.random()), fAng = Math.random() * Math.PI * 2;
     game.markDx = Math.cos(fAng) * fDist; game.markDy = Math.sin(fAng) * fDist;
+  }
+  if (type.id === "smoke" || type.id === "dangerClose"){
+    /* these two missions never roll the enemy-spotted event:
+       smoke has no correcting spotter at all, and the danger-close
+       friendlies are the pinned target themselves — their limited
+       right-place / not radio check is never spotted away */
+    game.spotterRiskAt = Infinity; game.spotterCompromised = false; game.spotterFate = null; game.spotterShots = 0;
+    game.spotterDx = 0; game.spotterDy = 0;
   }
   startUav();   /* commander-called round: the UAV launches with whatever fuel it refuelled to */
   var gl = $("gameTgtLabel"); if (gl) gl.textContent = type.short;
@@ -3435,9 +3992,8 @@ function newGameRound(){
   if (type.category === "timed"){
     setGameFeedback("", "<b>" + type.label + "</b> · <b>" + type.time + " s</b> · " + markText() +
       (type.id === "infantry" ? " " + infantryScatterText() : "") +
-      (type.id === "vehicleMove" ? " " + vehicleTargetText() : "") +
       (type.id === "infantry" ? " A round landing on them <b>stops them moving</b> for the rest of the round — hit them once and they go to ground where they stand." : "") +
-      " Red mark on the diamond, dial, FIRE — and walk the rounds in from the fall of shot." +
+      " Red mark on the diamond, dial, FIRE — and walk the rounds in from the fall of shot." + checkBriefNote() +
       (ammoOf(activeMortar()) === 0 ? " <b>RELOAD MORTAR " + (activeMortar() + 1) + "</b> first — Mortar " + (activeMortar() + 1) + "'s own " + shellName() + " magazine is empty (2 shells per 5–10 s)." : ""));
   } else if (type.category === "smoke"){
     setGameFeedback("", "<b>" + type.label + "</b> · " + (game.smokeTimed ? "<b>" + Math.round(game.timeMax) + " s</b>" : "<b>no timeout</b>") + " · " + markText() +
@@ -3449,7 +4005,8 @@ function newGameRound(){
       (ammoOf(activeMortar()) === 0 ? " <b>RELOAD MORTAR " + (activeMortar() + 1) + "</b> first — Mortar " + (activeMortar() + 1) + "'s own " + shellName() + " magazine is empty (2 shells per 5–10 s)." : ""));
   } else if (type.category === "dangerclose"){
     setGameFeedback("", "<b>" + type.label + "</b> · " + markText() + " " + dangerCloseText() +
-      " The friendlies are the <b>green dots</b> in the centre and the enemy are the <b>orange squads</b> pressing in around them — they keep closing while you work, but a squad that <b>takes a burst stops closing in</b> where it stands. Put the red mark by an <b>enemy squad</b>, never on the friendlies, dial, FIRE — and walk the rounds in from the fall of shot: the friendly leader is on the radio and can correct. Every moment an enemy squad stays up, the friendlies bleed." +
+      " The friendlies are the <b>green dots</b> in the centre and the enemy are the <b>orange squads</b> pressing in around them — they keep closing while you work, but a squad that <b>takes a burst stops closing in</b> where it stands. " + dcCallText() +
+      " Put the red mark on the <b>called coordinate</b>, never on the friendlies, dial, FIRE. Every moment an enemy squad stays up, the friendlies bleed." +
       (ammoOf(activeMortar()) === 0 ? " <b>RELOAD MORTAR " + (activeMortar() + 1) + "</b> first — Mortar " + (activeMortar() + 1) + "'s own " + shellName() + " magazine is empty (2 shells per 5–10 s)." : ""));
   } else {
     var surFb = [emplacementText(), defendersText(), vehiclesText()].filter(function(x){ return x; }).join(" ");
@@ -3461,12 +4018,12 @@ function newGameRound(){
         : "<b>" + type.hp + " HP</b> · 50/25/10 HP per hit band. ") + markText() +
       (type.id === "infantryHold" ? " " + infantryScatterText() : "") +
       (type.id === "vehicleStatic" ? " " + vehicleTargetText() : "") +
-      (surFb ? " " + surFb + " The position is only cleared when the structure" + (game.emplacements.length ? ", all its emplacements" : "") + ", its defenders" + (game.vehicles.length ? " and its parked vehicles" : "") + " are all down." : "") +
-      " Red mark on the diamond, dial, keep firing." +
+      (surFb ? " " + surFb + " The " + type.short.toLowerCase() + " itself is the PRIMARY target — focus on it: destroy it and the mission is done, even if" + (game.emplacements.length ? " its emplacements," : "") + " its defenders" + (game.vehicles.length ? " and its parked vehicles" : "") + " are still up around it. Everything around it is BONUS only: each emplacement destroyed, defender down or parked vehicle destroyed counts +1 targets down in the score, but none of it ends the mission — not one piece, and not all of it together — while the " + type.short.toLowerCase() + " itself still stands." : "") +
+      " Red mark on the diamond, dial, keep firing." + checkBriefNote() +
       (ammoOf(activeMortar()) === 0 ? " <b>RELOAD MORTAR " + (activeMortar() + 1) + "</b> first — Mortar " + (activeMortar() + 1) + "'s own " + shellName() + " magazine is empty (2 shells per 5–10 s)." : ""));
   }
   if (mortars[1])
-    $("gameFeedback").innerHTML += " Separate everything: each mortar has its <b>own dial</b> (M1 → TARGET · M2 → TARGET 2 — neither dial's mils are shown, read each off its scale), its <b>own FIRE button</b> and its <b>own RELOAD button</b> — dial, fire and reload each mortar separately for its own target, and Ask spotter corrects the selected mortar from its own last round.";
+    $("gameFeedback").innerHTML += " Separate everything: each mortar has its <b>own dial</b> (M1 → TARGET · M2 → TARGET 2 — neither dial's mils are shown, read each off its scale), its <b>own FIRE button</b> and its <b>own RELOAD button</b> — dial, fire and reload each mortar separately for its own target, and Ask spotter (when this round's mark has a spotter — it is disabled on a Squad Mark or Passing Squad mark, where Request check on mark takes its place once per round, and on danger close it only confirms right place or not) corrects the selected mortar from its own last round.";
   gameScoreText();
   updateTrainDial();
   updateMarkerTransforms();
@@ -3707,6 +4264,7 @@ function resolveImpact(impactFrac, shot){
     updateTargetStatus();
     setGameFeedback("near", who + "SMOKE SCREEN UP — impact " + bandWhere + ". Smoke does no damage, so nothing was hurt by that round. Switch to <b>HE</b> to damage the target, or keep Smoke to screen a position." +
       (ammoOf(shot.mIdx, "smoke") === 0 ? " That was Mortar " + (shot.mIdx + 1) + "'s last Smoke shell — press <b>RELOAD MORTAR " + (shot.mIdx + 1) + "</b> with Smoke selected to refill its own Smoke magazine." : ""));
+    maybeSpotterSpottedAfterShot();   /* even a smoke round is a round the spotter watched fall */
     gameScoreText(); refreshGameControls();
     return;
   }
@@ -3744,7 +4302,7 @@ function resolveImpact(impactFrac, shot){
      round can wreck one emplacement (or, if two sit close, nick
      both) and miss the structure, or the reverse. Two Mortar pits
      are tracked and reported separately. */
-  var empTotal = game.emplacements ? game.emplacements.length : 0, empDmg = 0, empHits = [];
+  var empTotal = game.emplacements ? game.emplacements.length : 0, empDmg = 0, empHits = [], empKilled = 0;
   if (empTotal){
     var mSeenR = 0, mTotR = 0;
     for (var emc = 0; emc < game.emplacements.length; emc++) if (game.emplacements[emc].variant.id === "mortar") mTotR++;
@@ -3757,6 +4315,7 @@ function resolveImpact(impactFrac, shot){
       if (emBand.dmg > 0){
         emd.hp = Math.max(0, emd.hp - emBand.dmg);
         empDmg += emBand.dmg;
+        if (emd.hp <= 0) empKilled++;   /* an emplacement destroyed by THIS impact — a bonus target down (see the hard branch) */
         empHits.push("<b>" + emLab + " −" + emBand.dmg + " HP</b>" + (emd.hp <= 0 ? " — destroyed" : " — " + emd.hp + " / " + emd.maxHp + " HP left"));
       }
     }
@@ -3799,7 +4358,7 @@ function resolveImpact(impactFrac, shot){
   var infNote = !isInfTgt ? "" : (infKilled > 0
     ? " <b>" + infKilled + (infKilled === 1 ? " man" : " men") + " down</b> — " + infLeft + " of " + game.infMen.length + " still up."
     : (infLeft > 0 ? " No man close enough to that burst went down — " + infLeft + " of " + game.infMen.length + " men still up." : " All men down."));
-  var isVehTgt = !!(game.type && (game.type.id === "vehicleMove" || game.type.id === "vehicleStatic") && game.vehTgt && game.vehTgt.length);
+  var isVehTgt = !!(game.type && game.type.id === "vehicleStatic" && game.vehTgt && game.vehTgt.length);
   var vehTKilled = 0, vehTDmg = 0, vehTHits = [], vehTLeft = 0, vehTClosest = Infinity;
   if (isVehTgt){
     for (var vti = 0; vti < game.vehTgt.length; vti++){
@@ -3807,16 +4366,12 @@ function resolveImpact(impactFrac, shot){
       if (!vtv.alive) continue;
       var vtDist = Math.hypot(ip.x - (markPosX + vtv.dx), ip.y - (markPosY + vtv.dy));
       if (vtDist < vehTClosest) vehTClosest = vtDist;
-      if (game.type.id === "vehicleMove"){
-        if (vtDist <= tt.kill){ vtv.alive = false; vehTKilled++; }
-      } else {
-        var vtBand = hitBand(vtDist, tt);
-        if (vtBand.dmg > 0){
-          vtv.hp = Math.max(0, vtv.hp - vtBand.dmg);
-          vehTDmg += vtBand.dmg;
-          vehTHits.push("<b>VEHICLE " + (vti + 1) + " −" + vtBand.dmg + " HP</b>" + (vtv.hp <= 0 ? " — destroyed" : " — " + vtv.hp + " / " + vtv.maxHp + " HP left on that vehicle"));
-          if (vtv.hp <= 0){ vtv.alive = false; vehTKilled++; }
-        }
+      var vtBand = hitBand(vtDist, tt);
+      if (vtBand.dmg > 0){
+        vtv.hp = Math.max(0, vtv.hp - vtBand.dmg);
+        vehTDmg += vtBand.dmg;
+        vehTHits.push("<b>VEHICLE " + (vti + 1) + " −" + vtBand.dmg + " HP</b>" + (vtv.hp <= 0 ? " — destroyed" : " — " + vtv.hp + " / " + vtv.maxHp + " HP left on that vehicle"));
+        if (vtv.hp <= 0){ vtv.alive = false; vehTKilled++; }
       }
     }
     vehTLeft = vehTargetAlive();
@@ -3862,36 +4417,61 @@ function resolveImpact(impactFrac, shot){
   } else if (hard){
     /* health system: graded damage by hit band inside THIS target's
        hidden blast rings (50 direct / 25 close / 10 shrapnel at the
-       edge). A surrounded position (squads, and for FOB / Cache /
-       Hideout parked vehicles too — plus the emplacements dug in
-       near a FOB / Hideout) is only cleared when the structure is
-       at 0 HP AND every defender, parked vehicle and the
-       emplacements are all down. */
+       edge). For a FOB / Hideout / Cache the STRUCTURE ITSELF is the
+       PRIMARY target — and the ONLY thing that ends the mission:
+       destroying the FOB / Hideout / Cache (0 HP) is target down,
+       DONE, even if defenders, parked vehicles or emplacements
+       around it are still up. Everything AROUND it — each
+       emplacement destroyed, each defender down, each parked
+       vehicle destroyed — is a BONUS: every one of them counts
+       +1 in the TARGETS DOWN score (game.hits, tallied separately
+       in game.bonus), but NONE of them ends the mission — not one
+       of them alone, and not all of them together: while the
+       structure stands, the round plays on. */
     var dmg = band.dmg;
     if (dmg > 0) game.hp = Math.max(0, game.hp - dmg);
     updateTargetStatus();
     var structureDown = game.hp <= 0;
-    var cleared = structureDown && defLeft === 0 && vehLeft === 0 && empLeft === 0;
-    if (cleared && (dmg > 0 || defKilled > 0 || vehKilled > 0 || empDmg > 0)){
+    /* BONUS targets down from THIS impact: surroundings destroyed
+       by this round count toward the TARGETS DOWN score right
+       away, whether or not the structure fell with them */
+    var bonusThis = empKilled + defKilled + vehKilled;
+    var bonusParts = [];
+    if (empKilled > 0) bonusParts.push(empKilled + (empKilled === 1 ? " emplacement" : " emplacements"));
+    if (defKilled > 0) bonusParts.push(defKilled + (defKilled === 1 ? " defender" : " defenders"));
+    if (vehKilled > 0) bonusParts.push(vehKilled + (vehKilled === 1 ? " parked vehicle" : " parked vehicles"));
+    if (bonusThis > 0){ game.hits += bonusThis; game.bonus += bonusThis; }
+    var bonusNote = bonusThis > 0
+      ? " <b>BONUS +" + bonusThis + " target" + (bonusThis === 1 ? "" : "s") + " down</b> — " + bonusParts.join(", ") + " destroyed around the " + game.type.short.toLowerCase() + ", counted in TARGETS DOWN."
+      : "";
+    var surroundingsTotal = empTotal + defTotal + vehTotal;
+    var surroundingsCleared = surroundingsTotal > 0 && empLeft === 0 && defLeft === 0 && vehLeft === 0;
+    var cleared = structureDown;
+    if (cleared){
       game.over = true; game.fired = true;
       game.hits++; game.streak++;
       stopGameTimer();
-      setGameFeedback("hit", who + "◎ POSITION CLEARED — " + (dmg > 0 ? band.label + " (−" + dmg + " HP) finished the " + game.type.short.toLowerCase() + "." : "that round finished the position.") +
-        empNote + defNote + vehNote + " Impact " + bandWhere + "." + dialNote);
+      var stillUp = [];
+      if (empLeft > 0) stillUp.push(empLeft + " of " + empTotal + " emplacements");
+      if (defLeft > 0) stillUp.push(defLeft + " of " + defTotal + " defenders");
+      if (vehLeft > 0) stillUp.push(vehLeft + " of " + vehTotal + " parked vehicles");
+      var stillNote = stillUp.length
+        ? " Mission done — " + stillUp.join(", ") + " still up around it don't matter: the " + game.type.short.toLowerCase() + " was the primary target."
+        : (surroundingsCleared ? " Everything around it is down too — all counted as bonus targets down." : "");
+      setGameFeedback("hit", who + "◎ TARGET DESTROYED — " + (dmg > 0 ? band.label + " (−" + dmg + " HP) destroyed the " + game.type.short.toLowerCase() + "." : "that round destroyed the " + game.type.short.toLowerCase() + ".") +
+        stillNote + bonusNote + empNote + defNote + vehNote + " Impact " + bandWhere + "." + dialNote);
     } else if (dmg === 0 && defKilled === 0 && vehKilled === 0 && empDmg === 0){
       setGameFeedback("miss", who + "Miss — impact " + bandWhere + ". No damage — the " + game.type.short.toLowerCase() +
-        " is still at <b>" + game.hp + " / " + game.maxHp + " HP</b>. It only takes damage on a close fall of shot." + empNote + defNote + vehNote + dialNote + markNote + emptyNote);
-    } else if (structureDown){
-      setGameFeedback("near", who + (dmg > 0 ? band.label + " — −" + dmg + " HP. " : "") +
-        "The " + game.type.short.toLowerCase() + " itself is <b>destroyed (0 HP)</b>, but the position still holds:" +
-        empNote + defNote + vehNote + " Keep firing at what is left around it." + emptyNote);
+        " is still at <b>" + game.hp + " / " + game.maxHp + " HP</b>. It only takes damage on a close fall of shot. The " + game.type.short.toLowerCase() + " itself is the primary target — only destroying it ends the mission; anything destroyed around it is bonus targets down." + empNote + defNote + vehNote + dialNote + markNote + emptyNote);
     } else if (dmg > 0){
       setGameFeedback(band.id === "direct" ? "hit" : "near", who + band.label + " — −" + dmg + " HP. " +
         game.type.label + " is at <b>" + game.hp + " / " + game.maxHp + " HP</b>. Impact " + bandWhere +
-        "." + empNote + defNote + vehNote + " Fire again." + dialNote + emptyNote);
+        "." + empNote + defNote + vehNote + bonusNote + " Keep firing on the " + game.type.short.toLowerCase() + " itself — it is the primary target: destroy it and the mission is done." + (surroundingsCleared ? " Everything around it is already down — all bonus, banked — but the mission is NOT done until the " + game.type.short.toLowerCase() + " itself is destroyed." : "") + dialNote + emptyNote);
     } else {
       setGameFeedback("near", who + "No damage to the " + game.type.short.toLowerCase() + " (still <b>" + game.hp + " / " + game.maxHp + " HP</b>) — impact " + bandWhere + ", but the round worked the surroundings:" +
-        empNote + defNote + vehNote + " Fire again." + dialNote + emptyNote);
+        empNote + defNote + vehNote + bonusNote + (surroundingsCleared
+          ? " Everything around the " + game.type.short.toLowerCase() + " is now down — all of it bonus targets down, banked in the score. But the mission is NOT done: the " + game.type.short.toLowerCase() + " itself is the primary target and it is still standing — destroy it to finish."
+          : " Bonus only, though — the " + game.type.short.toLowerCase() + " itself is the primary target, and the mission runs until you destroy it.") + dialNote + emptyNote);
     }
   } else if (game.type && game.type.category === "smoke"){
     /* smoke mission: no damage and nothing to kill — the screen
@@ -3930,7 +4510,7 @@ function resolveImpact(impactFrac, shot){
        graded HP off that squad — danger close cuts both ways.
        The mission is won when every enemy man is down, and
        lost the moment a friendly squad reaches 0 HP. */
-    var dcKilled = 0, dcHaltedNow = 0;
+    var dcKilled = 0, dcHaltedNow = 0, dcAnyHit = false;
     if (game.dcEnemySquads){
       for (var dsi = 0; dsi < game.dcEnemySquads.length; dsi++){
         var dsq = game.dcEnemySquads[dsi], dcen = dcSquadCentre(dsq);
@@ -3946,6 +4526,7 @@ function resolveImpact(impactFrac, shot){
            on stops closing in — freeze it at the distance it had
            reached when the shell caught it; the squads that were
            not hit keep pressing in */
+        if (sqHit) dcAnyHit = true;
         if (sqHit && !dsq.halted){
           dsq.halted = true;
           dsq.frozenDist = Math.hypot(dcen.x, dcen.y);
@@ -3969,6 +4550,15 @@ function resolveImpact(impactFrac, shot){
           }
         }
       }
+    }
+    /* remember, on THIS mortar's fall of shot, whether the round
+       landed in the RIGHT PLACE — burst on an enemy squad and NOT
+       inside the friendly-fire bands — because that is the ONLY
+       thing the pinned squad will confirm on Ask spotter for this
+       mission (see askSpotter's danger-close branch) */
+    if (game.lastImpact){
+      game.lastImpact.dcRight = dcAnyHit && dcFf.length === 0;
+      game.lastImpact.dcFfHit = dcFf.length > 0;
     }
     if (dcKilled > 0 || dcFf.length || dcHaltedNow > 0) updateMarkerTransforms();
     updateTargetStatus();
@@ -4001,48 +4591,31 @@ function resolveImpact(impactFrac, shot){
       setGameFeedback(dcHaltedNow ? "near" : "miss", who + "Miss — impact " + bandWhere + ", and no enemy man was close enough to that burst to go down." + dcHaltNote +
         " The squads are separate and closing in — aim at an orange squad itself, and keep the burst off the friendlies in the centre." + dialNote + markNote + emptyNote);
     }
-  } else if (isInfTgt || (isVehTgt && game.type && game.type.id === "vehicleMove")){
-    /* scattered movers on a timeout: no shared kill at the centre
+  } else if (isInfTgt){
+    /* scattered mover on a timeout: no shared kill at the centre
        either. Moving infantry go down MAN BY MAN — the round only
-       ends when every man is down before the clock does — and a
-       moving vehicle target's 1–3 vehicles are each destroyed
-       only by a round landing within the kill radius of THAT
-       vehicle. A burst at the mark's centre with nobody there
-       kills nothing, however the old centre distance read. */
+       ends when every man is down before the clock does. A burst
+       at the mark's centre with nobody there kills nothing,
+       however the old centre distance read. */
     updateTargetStatus();
-    if (isInfTgt){
-      if (infLeft === 0){
-        game.over = true; game.fired = true;
-        game.hits++; game.streak++;
-        stopGameTimer();
-        setGameFeedback("hit", who + "◎ ALL MEN DOWN — the last scattered squad is cleared, with <b>" + game.timeLeft.toFixed(1) + " s</b> to spare." + infNote + dialNote);
-      } else if (infKilled > 0){
-        setGameFeedback("near", who + "Men down where that round landed —" + infNote + infHaltNote + " The other squads are tens of metres away and untouched — walk the next round onto them. <b>" + game.timeLeft.toFixed(1) + " s</b> left." + dialNote + emptyNote);
-      } else if (infJustHalted){
-        setGameFeedback("near", who + "No man down, but that burst landed on them — <b>they have stopped moving</b> and gone to ground where they stand." + infNote + " Walk the next round onto the men still up. <b>" + game.timeLeft.toFixed(1) + " s</b> left." + dialNote + emptyNote);
-      } else {
-        setGameFeedback("miss", who + "Miss — impact " + bandWhere + ", but no man was close enough to that burst:" + infNote + " The squads are scattered — aim at a squad, not the middle of them. <b>" + game.timeLeft.toFixed(1) + " s</b> left" +
-          (game.infHalted ? ", and they are stopped where the earlier hit pinned them, so the range hint still holds." : ", and they have moved, so check the range hint again.") + dialNote + markNote + emptyNote);
-      }
+    if (infLeft === 0){
+      game.over = true; game.fired = true;
+      game.hits++; game.streak++;
+      stopGameTimer();
+      setGameFeedback("hit", who + "◎ ALL MEN DOWN — the last scattered squad is cleared, with <b>" + game.timeLeft.toFixed(1) + " s</b> to spare." + infNote + dialNote);
+    } else if (infKilled > 0){
+      setGameFeedback("near", who + "Men down where that round landed —" + infNote + infHaltNote + " The other squads are tens of metres away and untouched — walk the next round onto them. <b>" + game.timeLeft.toFixed(1) + " s</b> left." + dialNote + emptyNote);
+    } else if (infJustHalted){
+      setGameFeedback("near", who + "No man down, but that burst landed on them — <b>they have stopped moving</b> and gone to ground where they stand." + infNote + " Walk the next round onto the men still up. <b>" + game.timeLeft.toFixed(1) + " s</b> left." + dialNote + emptyNote);
     } else {
-      if (vehTLeft === 0){
-        game.over = true; game.fired = true;
-        game.hits++; game.streak++;
-        stopGameTimer();
-        setGameFeedback("hit", who + "◎ ALL VEHICLES DESTROYED — the last one caught inside its kill radius, with <b>" + game.timeLeft.toFixed(1) + " s</b> to spare." + vehTNote + dialNote);
-      } else if (vehTKilled > 0){
-        setGameFeedback("near", who + "Vehicle destroyed where that round landed —" + vehTNote + " The others are spread around the mark and untouched. <b>" + game.timeLeft.toFixed(1) + " s</b> left — shift onto the next one." + dialNote + emptyNote);
-      } else if (vehTClosest <= tt.blast){
-        setGameFeedback("near", who + "BLAST EDGE — that burst clipped the nearest vehicle but was not inside its kill radius, so it kept going." + vehTNote + " <b>" + game.timeLeft.toFixed(1) + " s</b> left — check the range hint and fire again." + dialNote + markNote + emptyNote);
-      } else {
-        setGameFeedback("miss", who + "Miss — impact " + bandWhere + ", not close enough to any single vehicle:" + vehTNote + " The vehicles are spread out — aim at one vehicle, not the middle of them. <b>" + game.timeLeft.toFixed(1) + " s</b> left, and they have moved, so check the range hint again." + dialNote + markNote + emptyNote);
-      }
+      setGameFeedback("miss", who + "Miss — impact " + bandWhere + ", but no man was close enough to that burst:" + infNote + " The squads are scattered — aim at a squad, not the middle of them. <b>" + game.timeLeft.toFixed(1) + " s</b> left" +
+        (game.infHalted ? ", and they are stopped where the earlier hit pinned them, so the range hint still holds." : ", and they have moved, so check the range hint again.") + dialNote + markNote + emptyNote);
     }
   } else {
     /* timeout system: a mover goes down only inside its own kill
-       radius — infantry die anywhere inside their blast ring, a
-       vehicle must be caught inside its close ring; a round that
-       only clips the blast edge is a near variant, not a kill */
+       radius — infantry die anywhere inside their blast ring; a
+       round that only clips the blast edge is a near variant, not
+       a kill */
     if (dist <= tt.kill){
       game.over = true; game.fired = true;
       game.hits++; game.streak++;
@@ -4060,6 +4633,7 @@ function resolveImpact(impactFrac, shot){
         dialNote + markNote + emptyNote);
     }
   }
+  maybeSpotterSpottedAfterShot();   /* a landed round can be the one the enemy traces back to the spotter */
   gameScoreText();
   refreshGameControls();
 }
@@ -4211,10 +4785,22 @@ function skipGameRound(){
   gameScoreText(); refreshGameControls(); updateMarkerTransforms();
 }
 /* ================= SPOTTER CORRECTION =================
-   After a shot, radio the nearest person who found the target —
-   whoever called it in this round (the commander on the UAV, the
-   squad that marked it, or the passing squad that stumbled onto
-   it) — and they call back a correction from the fall of shot:
+   After a shot, radio whoever called the target in this round
+   (the commander on the UAV, or a dedicated ground spotter) —
+   and they call back a correction from the fall of shot.
+   EXCEPTION: a mark from a PASSING SQUAD or a SQUAD MARK has
+   nobody watching the fall of shot — the passing squad has
+   moved on and a squad mark is just a mark — so Ask spotter is
+   DISABLED for those two sources (button dead in
+   refreshGameControls, and askSpotter refuses below). Those
+   rounds get REQUEST CHECK ON MARK instead (see CHECK ON
+   MARK): a varied checker comes in from far away, checks
+   the mark from a standoff (ground checkers stop well short
+   of it) and reports the checked target position, once per
+   round. DANGER
+   CLOSE is the one carve-out: its squad mark keeps a limited
+   Ask spotter that only confirms right place / not (handled
+   before the refusal below, and it gives no correction):
    which way the last round fell, IN METRES measured FROM
    THE TARGET both ways — long/short and left/right (e.g.
    "40 m long, 30 m right of the target") — and a RELATIVE
@@ -4227,9 +4813,12 @@ function skipGameRound(){
    an exact range and never call an exact dial setting in
    mils — the spotter speaks only in metres, so anyone can
    follow it without knowing the mil scale. Like the mark, the call's
-   precision varies with the source: the UAV commander calls it
-   tight (nearest 5 m), a marking squad to the nearest 10 m, and a
-   passing squad only roughly (nearest 25 m). Needs at least one
+   precision varies with the source: the UAV commander, the laser
+   spotter and the sniper team call it tight (nearest 5 m), and a
+   regular infantry spotter to the nearest 15 m. (Squad and passing
+   entries in SPOTTER_WHO are only the no-source fallback — a real
+   squad / passing mark never reaches a correction, see above.)
+   Needs at least one
    landed round this round — there is nothing to correct from
    before that. The correction is PER MORTAR: it is worked out
    for the SELECTED / ACTIVE mortar from that mortar's OWN last
@@ -4238,7 +4827,9 @@ function skipGameRound(){
    other mortar's fall of shot would give the wrong range. */
 var SPOTTER_WHO = {
   laser:   { who: "Friendly spotter — laser designator binoculars", step: 5 },
+  sniper:  { who: "Sniper team spotter — spotting scope", step: 5 },
   uav:     { who: "Commander on the UAV", step: 5 },
+  infantry:{ who: "Regular infantry spotter — binoculars", step: 15 },
   squad:   { who: "The squad that marked it", step: 10 },
   passing: { who: "The passing squad that found it", step: 25 }
 };
@@ -4264,15 +4855,88 @@ function askSpotter(){
     setGameFeedback("near", "No spotter correction on a smoke mission — the squad is advancing behind whatever smoke it gets. Read the fall of shot and adjust yourself.");
     return;
   }
-  /* a commander UAV that never arrived, ran low or RTB'd has no
-     eyes on the target — no correction, however good the fall of
-     shot was. Squad / passing-squad targets are unaffected. */
-  if (game.markSrc && game.markSrc.id === "uav" && game.uavState !== "station"){
+  /* DANGER CLOSE — the limited radio check: the pinned squad
+     gives NO correction on this mission. All Ask spotter tells
+     you is whether the ACTIVE mortar's last round landed in the
+     RIGHT PLACE or NOT: right place = the burst landed on an
+     enemy squad and outside the friendly-fire bands. The verdict
+     stored at impact time (li.dcRight, set in resolveImpact) is
+     used when there is one; otherwise it is re-judged from the
+     fall of shot against where the squads stand now. No metres,
+     no add / drop, no left / right — that is all they can say
+     while they are fighting for their lives. */
+  if (game.type.id === "dangerClose"){
+    var dcRight, dcFfHit = false;
+    if (liOwn.dcRight !== undefined){
+      dcRight = !!liOwn.dcRight; dcFfHit = !!liOwn.dcFfHit;
+    } else {
+      var dmp = posMeters(mortars[ai]), dtp = posMeters(game.targetFrac);
+      var ddx = dtp.x - dmp.x, ddy = dtp.y - dmp.y, dd0 = Math.hypot(ddx, ddy) || 1;
+      var dux = ddx / dd0, duy = ddy / dd0;
+      var dip = { x: dtp.x + liOwn.along * dux + liOwn.cross * -duy,
+                  y: dtp.y + liOwn.along * duy + liOwn.cross * dux };
+      var dBlast = game.type.blast || 22, dHit = false, di2, dj2;
+      if (game.dcEnemySquads) for (di2 = 0; di2 < game.dcEnemySquads.length; di2++){
+        var dsq2 = game.dcEnemySquads[di2], dcen2 = dcSquadCentre(dsq2);
+        for (dj2 = 0; dj2 < dsq2.men.length; dj2++){
+          var dmn2 = dsq2.men[dj2];
+          if (dmn2.alive && Math.hypot(dip.x - (dtp.x + dcen2.x + dmn2.dx), dip.y - (dtp.y + dcen2.y + dmn2.dy)) <= dBlast) dHit = true;
+        }
+      }
+      if (game.dcFriendlies) for (di2 = 0; di2 < game.dcFriendlies.length; di2++){
+        var dfsq = game.dcFriendlies[di2];
+        if (Math.hypot(dip.x - (dtp.x + dfsq.cx), dip.y - (dtp.y + dfsq.cy)) <= DC_FF_BANDS[DC_FF_BANDS.length - 1][0]) dcFfHit = true;
+      }
+      dcRight = dHit && !dcFfHit;
+    }
+    setGameFeedback(dcRight ? "hit" : "miss",
+      "PINNED SQUAD for <b>Mortar " + (ai + 1) + "</b>: “" +
+      (dcRight
+        ? "<b>RIGHT PLACE</b> — that round landed in the right place."
+        : dcFfHit
+        ? "<b>NOT THE RIGHT PLACE</b> — that round fell too close to the friendlies. Check your fire."
+        : "<b>NOT THE RIGHT PLACE</b> — that round did not land on an enemy squad.") +
+      "” That is all they can tell you — no range, no correction: shoot the coordinate they called and judge the rest from the fall of shot.");
+    return;
+  }
+  /* no spotter to ask when the mark came from a PASSING SQUAD or
+     a SQUAD MARK: nobody from either is watching the fall of shot
+     — the button is already disabled for these sources, and this
+     guard keeps a direct call honest too (danger close above is
+     the one exception, and it never reaches this guard) */
+  if (isNoSpotterMarkSrc(game.markSrc)){
+    setGameFeedback("miss", game.markSrc.id === "passing"
+      ? "No answer — this mark came from a <b>passing squad</b> that has moved on. <b>Ask spotter is disabled on a Passing Squad mark</b>: walk the rounds in from the fall of shot yourself — or use <b>Request check on mark</b>: a checker (commander UAV, infantry or vehicle) will come from far away to check the target position, once per round."
+      : "No answer — this is a <b>squad mark</b>, just a mark on the map with no spotter watching the fall of shot. <b>Ask spotter is disabled on a Squad Mark</b>: walk the rounds in from the fall of shot yourself — or use <b>Request check on mark</b>: a checker (commander UAV, infantry or vehicle) will come from far away to check the target position, once per round.");
+    return;
+  }
+  /* a commander UAV that never arrived or has RTB'd has no eyes
+     on the target — no correction, however good the fall of shot
+     was. LOW FUEL is different: even on low fuel the UAV can
+     still see from the sky, so a low-fuel UAV still answers —
+     only travel and RTB block it. Ground sources are unaffected
+     by fuel, but they can be spotted by the enemy (next check). */
+  if (game.markSrc && game.markSrc.id === "uav" && game.uavState !== "station" && game.uavState !== "low"){
     setGameFeedback("miss", game.uavState === "rtb"
       ? "No answer — the UAV is RTB and the commander has no eyes on the target any more. This round's corrections are done; walk the rounds in yourself."
-      : game.uavState === "low"
-      ? "No answer — the UAV is low on fuel and breaking off, so the commander can't call corrections any more this round."
       : "No answer — the UAV is still travelling to the target and has no eyes on it yet.");
+    return;
+  }
+  /* a ground spotter the enemy has already spotted gives no
+     correction any more this round — he is dead or has run */
+  if (game.spotterCompromised){
+    setGameFeedback("miss", "No answer — your spotter was <b>spotted by the enemy</b> and " +
+      (game.spotterFate === "killed" ? "killed where he sat" : "ran away from the target to survive") +
+      ". He can't give corrections any more this round: walk the rounds in from the fall of shot yourself.");
+    return;
+  }
+  /* calling him at all carries a risk: the radio call (and for
+     the laser man, a lase that can glint) can give him away —
+     sometimes the enemy spots him the moment you ask, and this
+     correction never comes */
+  if (isGroundSpotterSrc(game.markSrc) && game.type.id !== "dangerClose" && Math.random() < SPOTTER_ASK_RISK){
+    compromiseSpotter();
+    setGameFeedback("miss", spotterSpottedMsg());
     return;
   }
   var li = liOwn;   /* the ACTIVE mortar's own fall of shot, measured along its own line to the target */
@@ -4336,6 +5000,7 @@ function askSpotter(){
     fallTxt + " — " + adjTxt + ".”" +
     (isLaser ? " <b>LASED — the friendly spotter's designator binoculars have the target lased, so the accurate lased position is now shown on the grid map (cyan square with a centre dot, LASED POSITION) — but only temporarily, for a few seconds: put Mortar " + (ai + 1) + "'s mark on it now, or Ask spotter again to re-lase.</b>" : "") +
     (mortars[1] ? " This correction is Mortar " + (ai + 1) + "'s only — it does not apply to Mortar " + ((1 - ai) + 1) + ", which sits at its own range." : "") +
+    (game.markSrc && game.markSrc.id === "uav" && game.uavState === "low" ? " The UAV is on <b>low fuel</b> but still watching from the sky — corrections keep coming until it RTBs at 0%." : "") +
     (sp.step >= 25 ? " Rough call — they're estimating from where they stand." : ""));
 }
 /* ================= MINI GAME — FRAME THE VIEW ON THE RED MARK =================
@@ -4485,6 +5150,8 @@ function closeGame(){
   game.smokeTimed = false; clearSmokeSquad();
   clearDangerClose();
   game.markSrc = null; game.markDx = 0; game.markDy = 0; game.spotterDx = 0; game.spotterDy = 0;
+  game.spotterCompromised = false; game.spotterFate = null; game.spotterShots = 0; game.spotterRiskAt = Infinity;
+  resetCheck();   /* closing the game calls any travelling checker off and takes its icons off the grid */
   game.uavState = null; game.uavFuel = 0;
   gameTgtG.style.display = "none"; gameDefG.style.display = "none"; gameVehG.style.display = "none"; gameEmpG.style.display = "none"; gameUavG.style.display = "none"; gameLaserG.style.display = "none"; gameSpotterLine.style.display = "none"; gameLasedG.style.display = "none"; gameLasedLine.style.display = "none"; gameInfG.style.display = "none"; gameVehTgtG.style.display = "none"; gameSmokeSquadG.style.display = "none"; gameDcFriendG.style.display = "none"; gameDcEnemyG.style.display = "none";
   gameTrueG.style.display = "none"; gameTrueLine.style.display = "none";
@@ -4579,6 +5246,7 @@ $("gameSkipBatchBtn").addEventListener("click", function(){ skipNextBatchFor(0);
 $("gameSkipBatch2Btn").addEventListener("click", function(){ skipNextBatchFor(1); });
 $("gameSkipBtn").addEventListener("click", skipGameRound);
 $("gameSpotterBtn").addEventListener("click", askSpotter);
+$("gameCheckBtn").addEventListener("click", requestCheckOnMark);
 $("gameNextBtn").addEventListener("click", function(){ game.round++; newGameRound(); });
 /* W / S on the keyboard, like in game: W raises, S lowers.
    Ignored while typing in a field, and only while the game is open. */
@@ -4615,6 +5283,246 @@ function bindHold(btn, delta){
 }
 bindHold($("wsUpBtn"), 1);
 bindHold($("wsDownBtn"), -1);
+
+/* ================= SHARE MY STATS — name + ALL stats in one link =================
+   The player types a name / callsign in the Mini Game panel and
+   copies a link whose ?s=… QUERY part carries that name and EVERY
+   stat: map, date, round reached, targets down, rounds fired,
+   current streak, best streak and accuracy (targets down ÷ rounds
+   fired). The query part is deliberate: a #… fragment never leaves
+   the browser, so link previews used to miss the stats entirely
+   and fall back to the one generic template image for everyone.
+   The stats ride in the link itself (base64url JSON), so anyone
+   opening it lands on the shared-results card (#shareView) rebuilt
+   from the link alone — no account, no server, nothing stored.
+   When a share link is opened (and while the owner types a name),
+   the head's Open Graph / Twitter tags are rewritten to THAT
+   player: the title and description carry the name and every
+   stat, and og:image / twitter:image are set to that player's
+   own card as rendered by the page's own canvas — the name and
+   stats are never sent to a third-party image service. The
+   results card also renders the same numbers as an on-page
+   1200×630 PNG.
+   assets/og-image.png remains only as the fallback image for the
+   bare page address with no stats in it. Old #s=… links still
+   open: the reader checks the query first, then the fragment.
+   The only action in the panel is Select link to copy. */
+function shareAccuracy(down, fired){ return fired > 0 ? Math.min(100, Math.round(down / fired * 100)) + "%" : "—"; }   /* capped at 100%: one shell can bank several bonus targets down around a FOB / Hideout / Cache */
+function collectShareStats(){
+  var name = "";
+  var ni = $("shareNameInput");
+  if (ni) name = (ni.value || "").replace(/[\r\n]+/g, " ").trim().slice(0, 40);
+  return {
+    n: name || "Anonymous mortar",
+    m: currentMap ? currentMap[0] : "Kokan",
+    r: game.round, d: game.hits, f: game.shots,
+    s: game.streak, b: Math.max(game.bestStreak || 0, game.streak),
+    dt: new Date().toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" })
+  };
+}
+function shareStatRows(st){
+  return [
+    ["Round", st.r], ["Targets down", st.d], ["Rounds fired", st.f],
+    ["Streak", st.s], ["Best streak", st.b], ["Accuracy", shareAccuracy(st.d, st.f)]
+  ];
+}
+function encodeShare(st){
+  var json = JSON.stringify(st);
+  var b64 = btoa(unescape(encodeURIComponent(json)));
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function decodeShare(code){
+  try {
+    var b64 = code.replace(/-/g, "+").replace(/_/g, "/");
+    while (b64.length % 4) b64 += "=";
+    var st = JSON.parse(decodeURIComponent(escape(atob(b64))));
+    if (!st || typeof st !== "object") return null;
+    var num = function(v){ v = parseInt(v, 10); return isNaN(v) || v < 0 ? 0 : v; };
+    return {
+      n: String(st.n || "Anonymous mortar").slice(0, 40),
+      m: String(st.m || "Kokan").slice(0, 60),
+      r: num(st.r), d: num(st.d), f: num(st.f),
+      s: num(st.s), b: num(st.b),
+      dt: String(st.dt || "").slice(0, 30)
+    };
+  } catch (e) { return null; }
+}
+function buildShareLink(st){
+  var code = encodeShare(st || collectShareStats());
+  try {
+    var url = new URL(window.location.href);
+    url.hash = "";
+    url.searchParams.set("s", code);
+    return url.href;
+  } catch (e) {
+    var base = window.location.href.split("#")[0].split("?")[0];
+    return base + "?s=" + code;
+  }
+}
+function statGridHTML(st){
+  var rows = shareStatRows(st), out = "";
+  for (var i = 0; i < rows.length; i++)
+    out += "<div class=\"ss\"><div class=\"sl\">" + rows[i][0] + "</div><div class=\"sv\">" + rows[i][1] + "</div></div>";
+  return out;
+}
+function updateSharePreview(){
+  var st = collectShareStats();
+  var prev = $("shareStatsPreview");
+  if (prev) prev.innerHTML = statGridHTML(st);
+  var out = $("shareLinkOut");
+  if (out) out.value = buildShareLink(st);
+  /* keep the head's preview tags describing THIS player's card
+     while they play — but never overwrite the tags of a shared
+     card that is currently open in front of them */
+  var view = $("shareView");
+  if (st.n !== "Anonymous mortar" && (!view || view.hidden)) applyShareMeta(st);
+}
+/* the 1200×630 share card — same layout as assets/og-image.png,
+   with this player's name and stats filled in */
+function drawShareCard(st){
+  var cv = document.createElement("canvas");
+  cv.width = 1200; cv.height = 630;
+  var c = cv.getContext("2d");
+  c.fillStyle = "#101214"; c.fillRect(0, 0, 1200, 630);
+  c.strokeStyle = "#ffb52e"; c.lineWidth = 6; c.strokeRect(3, 3, 1194, 624);
+  c.fillStyle = "#0c0e10"; c.fillRect(36, 30, 1128, 90);
+  c.strokeStyle = "#3a4048"; c.lineWidth = 2; c.strokeRect(36, 30, 1128, 90);
+  c.fillStyle = "#ffb52e"; c.font = "700 34px 'Saira Condensed', sans-serif";
+  c.fillText("PR MORTAR CALCULATOR", 60, 70);
+  c.fillStyle = "#a9a698"; c.font = "500 22px 'Saira Condensed', sans-serif";
+  c.fillText("MINI GAME — DIAL TRAINING RESULTS", 60, 102);
+  c.fillStyle = "#a9a698"; c.font = "700 20px 'Saira Condensed', sans-serif";
+  c.fillText("SHARED BY", 60, 158);
+  c.fillStyle = "#ece9df";
+  var nm = st.n, fs = 64;
+  c.font = "700 " + fs + "px 'Saira Condensed', sans-serif";
+  while (c.measureText(nm).width > 1080 && fs > 30){ fs -= 4; c.font = "700 " + fs + "px 'Saira Condensed', sans-serif"; }
+  c.fillText(nm, 60, 158 + fs);
+  c.fillStyle = "#a9a698"; c.font = "500 24px 'Saira Condensed', sans-serif";
+  c.fillText("Map: " + st.m + (st.dt ? "  •  " + st.dt : ""), 60, 268);
+  var rows = shareStatRows(st);
+  for (var i = 0; i < rows.length; i++){
+    var x = 60 + (i % 3) * 360, y = 300 + Math.floor(i / 3) * 138;
+    c.fillStyle = "#1b1e22"; c.fillRect(x, y, 340, 120);
+    c.strokeStyle = "#3a4048"; c.lineWidth = 2; c.strokeRect(x, y, 340, 120);
+    c.fillStyle = "#a9a698"; c.font = "700 20px 'Saira Condensed', sans-serif";
+    c.fillText(rows[i][0].toUpperCase(), x + 20, y + 38);
+    c.fillStyle = "#ffb52e"; c.font = "700 46px 'IBM Plex Mono', monospace";
+    c.fillText(String(rows[i][1]), x + 20, y + 92);
+  }
+  c.fillStyle = "#a9a698"; c.font = "500 19px 'Saira Condensed', sans-serif";
+  c.fillText("Fan-made tool for Project Reality: BF2 — not affiliated with the PR Team.", 60, 596);
+  return cv;
+}
+function refreshShareCardPreview(){
+  var st = collectShareStats();
+  var img = $("shareCardPreview");
+  if (img){ img.src = drawShareCard(st).toDataURL("image/png"); img.hidden = false; }
+}
+function setShareMsg(t){ var m = $("shareMsg"); if (m) m.textContent = t; }
+function selectShareLink(doneMsg){
+  var out = $("shareLinkOut");
+  updateSharePreview();
+  if (out){ out.focus(); out.select(); try { out.setSelectionRange(0, out.value.length); } catch (e) {} }
+  setShareMsg(doneMsg);
+}
+var _shareNameEl = $("shareNameInput");
+if (_shareNameEl) _shareNameEl.addEventListener("input", function(){ updateSharePreview(); refreshShareCardPreview(); });
+var _shareCopyBtn = $("shareCopyBtn");
+if (_shareCopyBtn) _shareCopyBtn.addEventListener("click", function(){
+  refreshShareCardPreview();
+  applyShareMeta(collectShareStats());
+  selectShareLink("Link selected above — copy it (Ctrl+C, or long-press → Copy) and paste it anywhere; whoever opens it lands on your full results card with your name and all your stats.");
+});
+/* opened from a share link: rebuild the results card from the
+   link's own data, and point the Open Graph / Twitter tags at
+   this player's name and stats */
+function setMeta(id, val){
+  var m = document.getElementById(id);
+  if (m) m.setAttribute("content", val);
+}
+/* point every preview tag at this player: title and description
+   carry the name and ALL stats, and the image is this player's
+   own card, rendered by the page's own canvas (drawShareCard) —
+   the name and stats never leave the page for a third-party
+   image service. NOTE: a preview crawler that fetches only the
+   static HTML still cannot see these per-player tags; serving a
+   per-player preview in the initial response needs a server
+   route for ?s=… — this static page cannot do that. */
+function applyShareMeta(st){
+  var title = st.n + " — Mini Game stats · PR Mortar Calculator";
+  var desc = st.n + " · Round " + st.r + " · Targets down " + st.d + " · Rounds fired " + st.f +
+    " · Streak " + st.s + " · Best streak " + st.b + " · Accuracy " + shareAccuracy(st.d, st.f) +
+    " · Map: " + st.m + (st.dt ? " · " + st.dt : "");
+  setMeta("ogTitle", title); setMeta("twTitle", title);
+  setMeta("ogDesc", desc); setMeta("twDesc", desc); setMeta("metaDesc", desc);
+  var img = drawShareCard(st).toDataURL("image/png");
+  setMeta("ogImage", img); setMeta("twImage", img);
+  setMeta("ogImgW", "1200"); setMeta("ogImgH", "630");
+}
+function showSharedStats(st){
+  var view = $("shareView");
+  if (!view) return;
+  $("shareViewName").textContent = st.n;
+  $("shareViewMeta").textContent = "Map: " + st.m + (st.dt ? "  •  " + st.dt : "");
+  $("shareViewStats").innerHTML = statGridHTML(st);
+  document.title = st.n + " — Mini Game stats · PR Mortar Calculator";
+  applyShareMeta(st);
+  view.hidden = false;
+}
+function sharedStatsFromURL(){
+  var code = null;
+  try { code = new URL(window.location.href).searchParams.get("s"); } catch (e) {}
+  if (!code){
+    var h = window.location.hash || "";
+    var m = /(?:^#|&)s=([A-Za-z0-9\-_]+)/.exec(h);
+    if (m) code = m[1];
+  }
+  return code ? decodeShare(code) : null;
+}
+/* fallback for the bare page address: link previews want an
+   absolute og:image URL, so point the tags at this page's own
+   full address for the static card image — applyShareMeta
+   replaces it with the player's own rendered preview image
+   whenever stats are in the link or a name is typed */
+try {
+  var _absOg = new URL("assets/og-image.png", window.location.href).href;
+  setMeta("ogImage", _absOg); setMeta("twImage", _absOg);
+} catch (e) {}
+var _sharedSt = sharedStatsFromURL();
+if (_sharedSt){
+  showSharedStats(_sharedSt);
+  var ni2 = $("shareNameInput");
+  if (ni2 && _sharedSt.n !== "Anonymous mortar") ni2.value = _sharedSt.n;
+}
+window.addEventListener("hashchange", function(){
+  var st = sharedStatsFromURL();
+  if (st) showSharedStats(st);
+});
+function hideShareView(){ var v = $("shareView"); if (v) v.hidden = true; }
+var _svClose = $("shareViewCloseBtn");
+if (_svClose) _svClose.addEventListener("click", hideShareView);
+var _svImg = $("shareViewImgBtn");
+if (_svImg) _svImg.addEventListener("click", function(){
+  var st = sharedStatsFromURL() || collectShareStats();
+  var cv = drawShareCard(st);
+  if (cv.toBlob){
+    cv.toBlob(function(blob){
+      if (!blob) return;
+      var a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "pr-mini-game-stats.png";
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 400);
+    }, "image/png");
+  }
+});
+var _svPlay = $("shareViewPlayBtn");
+if (_svPlay) _svPlay.addEventListener("click", function(){
+  hideShareView();
+  if (!game.active) openGame();
+});
+updateSharePreview();
 
 render();
 })();

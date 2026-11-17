@@ -299,6 +299,10 @@
   /* Ask spotter: same block shape, green edge — a live-round aid,
      enabled only once a round has landed this round */
   .spotterbtn{border-color:var(--green)}
+  /* Request check on mark: same block shape, amber edge — only
+     shown on Squad Mark / Passing Squad rounds, where there is
+     no spotter to ask */
+  .checkbtn{border-color:var(--amber)}
   /* the dashed ring around a commander-called mark: the UAV is
      orbiting the target, so the ring slowly spins (its drone badge
      sits outside the spinning group and stays upright) */
@@ -716,4 +720,59 @@
       grid-column:1; grid-row:2; top:auto; max-height:none; margin:10px 12px 12px;
     }
     body.game-open #gameInfoPanel{left:50%}
+  }
+
+  /* ---------- Share my stats (Mini Game) + shared-results view ----------
+     The share link carries the player's typed name and ALL stats in
+     its ?s=… query part. The Mini Game panel holds the name field, a
+     live all-stats preview, the link itself and its one action
+     (Select link to copy); opening a share link lands on the
+     .shareview results card, styled to match the 1200×630 card the
+     page renders from the same numbers. */
+  .sharesec{margin-top:10px; border:1px solid var(--line-soft); border-radius:8px; background:var(--inset); color:var(--on-inset); padding:10px 12px}
+  .sharesec h3{margin:0 0 8px; font-size:.92rem; letter-spacing:.12em; text-transform:uppercase; color:var(--on-inset)}
+  .sharesec .field{margin-bottom:8px}
+  .sharesec .field label{color:var(--on-inset)}
+  .sharesec .field label .tag{color:var(--on-inset-faint)}
+  .sharesec input{
+    width:100%; padding:7px 10px; border-radius:6px; border:1px solid var(--line);
+    background:var(--panel2); color:var(--ink);
+    font-family:"IBM Plex Mono", monospace; font-size:1rem; font-weight:600;
+  }
+  .sharesec input:focus{outline:2px solid var(--amber-dim); outline-offset:0}
+  .sharesec #shareLinkOut{font-size:.8rem; font-weight:500}
+  .sharestatgrid{display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin:8px 0}
+  .sharestatgrid .ss{background:var(--panel); border:1px solid var(--line-soft); border-radius:6px; padding:6px 8px; min-width:0}
+  .sharestatgrid .ss .sl{font-size:.64rem; letter-spacing:.1em; font-weight:700; color:var(--ink-dim); text-transform:uppercase; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .sharestatgrid .ss .sv{font-family:"IBM Plex Mono", monospace; font-weight:700; font-size:1.25rem; line-height:1.15; color:var(--amber)}
+  .sharestatgrid.big .ss .sv{font-size:1.6rem}
+  .sharebtns{display:flex; flex-wrap:wrap; gap:7px}
+  .sharebtns .nextbtn{flex:1 1 150px; width:auto; margin-top:0}
+  .sharebtn-main{border-color:var(--amber-dim)}
+  .sharepreview{display:block; width:100%; height:auto; margin-top:9px; border:1px solid var(--line); border-radius:6px}
+  .sharepreview[hidden]{display:none}
+  .sharemsg{color:var(--on-inset-dim)}
+  .shareview{
+    position:fixed; inset:0; z-index:200; overflow-y:auto;
+    background:rgba(8,9,10,.82); padding:18px 12px;
+    display:flex; align-items:flex-start; justify-content:center;
+  }
+  .shareview[hidden]{display:none}
+  .sharecard{
+    width:min(680px, 100%); margin:auto 0;
+    background:var(--panel); color:var(--ink);
+    border:2px solid var(--amber-dim); border-radius:10px;
+    padding:18px; box-shadow:0 22px 54px rgba(0,0,0,.6);
+  }
+  .sharecard-head{background:var(--inset); border:1px solid var(--line-soft); border-radius:6px; padding:10px 14px}
+  .sharecard-kicker{font-weight:700; letter-spacing:.08em; font-size:1.35rem; color:var(--amber); line-height:1.1}
+  .sharecard-sub{letter-spacing:.14em; font-size:.85rem; color:var(--on-inset-dim); margin-top:2px}
+  .sharecard-sharedby{margin-top:16px; font-size:.78rem; letter-spacing:.16em; font-weight:700; color:var(--ink-dim)}
+  .sharecard-name{margin:2px 0 0; font-size:2.6rem; line-height:1.05; font-weight:700; overflow-wrap:break-word}
+  .sharecard-meta{margin:6px 0 0; font-family:"IBM Plex Mono", monospace; font-size:.92rem; color:var(--ink-dim)}
+  .sharecard .note{margin-top:12px}
+  @media (max-width:560px){
+    .sharestatgrid{grid-template-columns:repeat(2,1fr)}
+    .sharecard-name{font-size:2rem}
+    .sharecard{padding:13px}
   }
