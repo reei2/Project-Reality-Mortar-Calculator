@@ -5292,17 +5292,20 @@ bindHold($("wsDownBtn"), -1);
    fired). The query part is deliberate: a #… fragment never leaves
    the browser, so link previews used to miss the stats entirely
    and fall back to the one generic template image for everyone.
-   The stats ride in the link itself (base64url JSON), so anyone
-   opening it lands on the shared-results card (#shareView) rebuilt
-   from the link alone — no account, no server, nothing stored.
+   The stats ride in the link itself as a short plain code
+   (compact v3 packing — see encodeShare; old v2 and v1
+   base64url links still decode), so anyone opening it lands on the shared-results
+   card (#shareView) rebuilt from the link alone — no account, no
+   server, nothing stored.
    When a share link is opened (and while the owner types a name),
    the head's Open Graph / Twitter tags are rewritten to THAT
    player: the title and description carry the name and every
-   stat, and og:image / twitter:image are set to that player's
-   own card as rendered by the page's own canvas — the name and
-   stats are never sent to a third-party image service. The
-   results card also renders the same numbers as an on-page
-   1200×630 PNG.
+   stat, and og:image / twitter:image point at the hosted card
+   PNG as a full http(s) URL — preview crawlers reject data:
+   URLs, so the player's canvas-rendered card is shown on the
+   page itself (results card, in-panel preview, downloadable
+   PNG), never in the image tags. The results card also renders
+   the same numbers as an on-page 1200×630 PNG.
    assets/og-image.png remains only as the fallback image for the
    bare page address with no stats in it. Old #s=… links still
    open: the reader checks the query first, then the fragment.
@@ -5326,18 +5329,127 @@ function shareStatRows(st){
     ["Streak", st.s], ["Best streak", st.b], ["Accuracy", shareAccuracy(st.d, st.f)]
   ];
 }
-function encodeShare(st){
-  var json = JSON.stringify(st);
-  var b64 = btoa(unescape(encodeURIComponent(json)));
+/* Short share code (v3): the v1 code was base64 of the full JSON
+   ({"n":…,"m":"Kokan","r":…,"dt":"17 Nov 2026"}) — 98–114 chars for
+   the ?s= part alone, which made the link feel like a long salt.
+   v2 packed the stats positionally but kept the base64url wrap
+   (~28–48 chars). v3 drops the base64 wrap entirely — base64
+   inflates everything by a third for no benefit here, because
+   every field is already URL-safe on its own. The v3 code is
+   plain text: "3-<map>-<nums>-<date>-<name>" where the map is
+   its index in MAPS in base36 (Kokan = "h", not "Kokan"), the
+   five stats are base36 joined by ".", the date is days since
+   2020-01-01 in base36 ("1xs" for 17 Nov 2026, not the full
+   text), and the name comes last (so a "-" inside it is safe),
+   with a space written as a single "_" instead of "%20". The
+   default name "Anonymous mortar" is left out entirely — the
+   decoder puts it back. A typical code is now ~18 chars with
+   no name typed and ~22–30 chars with one, e.g.
+   "3-h-1.0.0.0.0-1xs" or "3-h-5.a.k.2.5-1xs-Reei".
+   Unknown maps / unparseable dates fall back to the v2 code so
+   nothing is lost. Old v2 and v1 codes still decode below. */
+var SHARE_EPOCH = Date.UTC(2020, 0, 1);
+var SHARE_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function shareDateToCode(dt){
+  if (!dt) return "";
+  var t = Date.parse(dt);
+  if (isNaN(t)) return "!" + encodeURIComponent(String(dt).slice(0, 30));
+  var d = new Date(t);
+  var days = Math.round((Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) - SHARE_EPOCH) / 86400000);
+  if (days < 0) return "!" + encodeURIComponent(String(dt).slice(0, 30));
+  return days.toString(36);
+}
+function shareDateFromCode(code){
+  if (!code) return "";
+  if (code.charAt(0) === "!"){ try { return decodeURIComponent(code.slice(1)).slice(0, 30); } catch (e) { return ""; } }
+  var days = parseInt(code, 36);
+  if (isNaN(days) || days < 0) return "";
+  var d = new Date(SHARE_EPOCH + days * 86400000);
+  return d.getUTCDate() + " " + SHARE_MONTHS[d.getUTCMonth()] + " " + d.getUTCFullYear();
+}
+/* v3 name packing: a space is one "_" (not "%20"); a literal
+   "_" in the name is escaped to "%5F" first so the two never
+   collide. Everything else keeps encodeURIComponent's escapes. */
+function shareNameToCode(name){
+  var enc = encodeURIComponent(String(name).slice(0, 40));
+  return enc.replace(/_/g, "%5F").replace(/%20/g, "_");
+}
+function shareNameFromCode(code){
+  if (!code) return "Anonymous mortar";
+  try {
+    var dec = decodeURIComponent(String(code).replace(/_/g, " ")).slice(0, 40);
+    return dec || "Anonymous mortar";
+  } catch (e) { return "Anonymous mortar"; }
+}
+/* the old v2 code, kept only as the fallback for the rare stats
+   v3 cannot pack plainly (a map name outside MAPS, or a date
+   that will not parse) — and so its shape stays in one place */
+function encodeShareV2(st){
+  var mapCode = "!" + encodeURIComponent(String(st.m || "Kokan").slice(0, 60));
+  for (var i = 0; i < MAPS.length; i++){ if (MAPS[i][0] === st.m){ mapCode = i.toString(36); break; } }
+  var nums = [st.r, st.d, st.f, st.s, st.b].map(function(v){ v = parseInt(v, 10); return (isNaN(v) || v < 0 ? 0 : v).toString(36); }).join(".");
+  var payload = "2|" + encodeURIComponent(String(st.n || "Anonymous mortar").slice(0, 40)) + "|" + mapCode + "|" + nums + "|" + shareDateToCode(st.dt);
+  var b64 = btoa(unescape(encodeURIComponent(payload)));
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+function encodeShare(st){
+  var dateCode = shareDateToCode(st.dt);
+  var mapIdx = -1;
+  for (var i = 0; i < MAPS.length; i++){ if (MAPS[i][0] === st.m){ mapIdx = i; break; } }
+  if (mapIdx < 0 || (dateCode && dateCode.charAt(0) === "!")) return encodeShareV2(st);
+  var nums = [st.r, st.d, st.f, st.s, st.b].map(function(v){ v = parseInt(v, 10); return (isNaN(v) || v < 0 ? 0 : v).toString(36); }).join(".");
+  var code = "3-" + mapIdx.toString(36) + "-" + nums + "-" + dateCode;
+  var name = String(st.n || "Anonymous mortar").slice(0, 40);
+  if (name && name !== "Anonymous mortar") code += "-" + shareNameToCode(name);
+  return code;
+}
 function decodeShare(code){
+  if (!code) return null;
+  /* v3: plain "3-<map>-<nums>-<date>-<name>" — the name is the
+     remainder after the third "-", so "-" inside it is safe */
+  if (code.slice(0, 2) === "3-"){
+    var rest = code.slice(2);
+    var i1 = rest.indexOf("-");
+    var i2 = i1 < 0 ? -1 : rest.indexOf("-", i1 + 1);
+    if (i1 < 0 || i2 < 0) return null;
+    var i3 = rest.indexOf("-", i2 + 1);
+    var datePart = i3 < 0 ? rest.slice(i2 + 1) : rest.slice(i2 + 1, i3);
+    var namePart = i3 < 0 ? "" : rest.slice(i3 + 1);
+    var mi3 = parseInt(rest.slice(0, i1), 36);
+    var ns3 = rest.slice(i1 + 1, i2).split(".");
+    var num36v3 = function(v){ v = parseInt(v, 36); return isNaN(v) || v < 0 ? 0 : v; };
+    return {
+      n: namePart ? shareNameFromCode(namePart) : "Anonymous mortar",
+      m: (!isNaN(mi3) && MAPS[mi3]) ? MAPS[mi3][0] : "Kokan",
+      r: num36v3(ns3[0]), d: num36v3(ns3[1]), f: num36v3(ns3[2]),
+      s: num36v3(ns3[3]), b: num36v3(ns3[4]),
+      dt: shareDateFromCode(datePart)
+    };
+  }
   try {
     var b64 = code.replace(/-/g, "+").replace(/_/g, "/");
     while (b64.length % 4) b64 += "=";
-    var st = JSON.parse(decodeURIComponent(escape(atob(b64))));
-    if (!st || typeof st !== "object") return null;
+    var raw = decodeURIComponent(escape(atob(b64)));
     var num = function(v){ v = parseInt(v, 10); return isNaN(v) || v < 0 ? 0 : v; };
+    if (raw.charAt(0) === "2" && raw.charAt(1) === "|"){
+      var parts = raw.split("|");
+      if (parts.length !== 5) return null;
+      var name = "Anonymous mortar";
+      try { name = decodeURIComponent(parts[1]).slice(0, 40) || name; } catch (e) {}
+      var map = "Kokan";
+      if (parts[2].charAt(0) === "!"){ try { map = decodeURIComponent(parts[2].slice(1)).slice(0, 60) || map; } catch (e) {} }
+      else { var mi = parseInt(parts[2], 36); if (!isNaN(mi) && MAPS[mi]) map = MAPS[mi][0]; }
+      var ns = parts[3].split(".");
+      var num36 = function(v){ v = parseInt(v, 36); return isNaN(v) || v < 0 ? 0 : v; };
+      return {
+        n: name, m: map,
+        r: num36(ns[0]), d: num36(ns[1]), f: num36(ns[2]),
+        s: num36(ns[3]), b: num36(ns[4]),
+        dt: shareDateFromCode(parts[4])
+      };
+    }
+    var st = JSON.parse(raw);
+    if (!st || typeof st !== "object") return null;
     return {
       n: String(st.n || "Anonymous mortar").slice(0, 40),
       m: String(st.m || "Kokan").slice(0, 60),
@@ -5442,13 +5554,17 @@ function setMeta(id, val){
   if (m) m.setAttribute("content", val);
 }
 /* point every preview tag at this player: title and description
-   carry the name and ALL stats, and the image is this player's
-   own card, rendered by the page's own canvas (drawShareCard) —
-   the name and stats never leave the page for a third-party
-   image service. NOTE: a preview crawler that fetches only the
-   static HTML still cannot see these per-player tags; serving a
-   per-player preview in the initial response needs a server
-   route for ?s=… — this static page cannot do that. */
+   carry the name and ALL stats. The image tags point at the
+   hosted card PNG as a full http(s) URL on this origin — they
+   used to be set to this player's canvas card as a data: URL,
+   which Discord and the other preview crawlers reject outright,
+   so shared links showed no image at all; the player's own
+   rendered card still appears on the page itself (the results
+   card and the in-panel preview). NOTE: a preview crawler that
+   fetches only the static HTML still cannot see these per-player
+   tags; serving a per-player preview in the initial response
+   needs a server route for ?s=… — this static page cannot do
+   that. */
 function applyShareMeta(st){
   var title = st.n + " — Mini Game stats · PR Mortar Calculator";
   var desc = st.n + " · Round " + st.r + " · Targets down " + st.d + " · Rounds fired " + st.f +
@@ -5456,8 +5572,10 @@ function applyShareMeta(st){
     " · Map: " + st.m + (st.dt ? " · " + st.dt : "");
   setMeta("ogTitle", title); setMeta("twTitle", title);
   setMeta("ogDesc", desc); setMeta("twDesc", desc); setMeta("metaDesc", desc);
-  var img = drawShareCard(st).toDataURL("image/png");
-  setMeta("ogImage", img); setMeta("twImage", img);
+  /* the image tags always keep the canonical hosted PNG address —
+     the same absolute URL hardcoded in the static head tags, which
+     is the only form preview crawlers (raw HTML, no JS) can use */
+  setMeta("ogImage", OG_IMAGE_URL); setMeta("twImage", OG_IMAGE_URL); setMeta("ogImgSecure", OG_IMAGE_URL);
   setMeta("ogImgW", "1200"); setMeta("ogImgH", "630");
 }
 function showSharedStats(st){
@@ -5475,20 +5593,22 @@ function sharedStatsFromURL(){
   try { code = new URL(window.location.href).searchParams.get("s"); } catch (e) {}
   if (!code){
     var h = window.location.hash || "";
-    var m = /(?:^#|&)s=([A-Za-z0-9\-_]+)/.exec(h);
+    var m = /(?:^#|&)s=([^&]+)/.exec(h);
     if (m) code = m[1];
   }
   return code ? decodeShare(code) : null;
 }
-/* fallback for the bare page address: link previews want an
-   absolute og:image URL, so point the tags at this page's own
-   full address for the static card image — applyShareMeta
-   replaces it with the player's own rendered preview image
-   whenever stats are in the link or a name is typed */
-try {
-  var _absOg = new URL("assets/og-image.png", window.location.href).href;
-  setMeta("ogImage", _absOg); setMeta("twImage", _absOg);
-} catch (e) {}
+/* the canonical hosted card image: the GitHub Pages address
+   hardcoded in the static head tags in index.html. Preview
+   crawlers read only that raw HTML (no JS), so the static tags
+   are what Discord actually uses; this constant just keeps the
+   JS rewrites below pointing at the exact same absolute URL
+   instead of resolving against whatever host served the page. */
+var OG_IMAGE_URL = "https://reei2.github.io/Project-Reality-Mortar-Calculator/assets/og-image.png";
+/* backstop for the bare page address: keep the image tags on the
+   canonical hosted PNG — applyShareMeta does the same whenever
+   stats are in the link or a name is typed */
+setMeta("ogImage", OG_IMAGE_URL); setMeta("twImage", OG_IMAGE_URL); setMeta("ogImgSecure", OG_IMAGE_URL);
 var _sharedSt = sharedStatsFromURL();
 if (_sharedSt){
   showSharedStats(_sharedSt);
