@@ -1,0 +1,1 @@
+{"$schema":"https://openapi.vercel.sh/vercel.json","rewrites":[{"destination":"/api/share","has":[{"key":"s","type":"query"}],"missing":[{"key":"play","type":"query"}],"source":"/"}]}

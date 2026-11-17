@@ -5598,13 +5598,13 @@ function sharedStatsFromURL(){
   }
   return code ? decodeShare(code) : null;
 }
-/* the canonical hosted card image: the GitHub Pages address
+/* the canonical hosted card image: the Vercel address
    hardcoded in the static head tags in index.html. Preview
    crawlers read only that raw HTML (no JS), so the static tags
    are what Discord actually uses; this constant just keeps the
    JS rewrites below pointing at the exact same absolute URL
    instead of resolving against whatever host served the page. */
-var OG_IMAGE_URL = "https://reei2.github.io/Project-Reality-Mortar-Calculator/assets/og-image.png";
+var OG_IMAGE_URL = "https://project-reality-mortar-calculator.vercel.app/assets/og-image.png";
 /* backstop for the bare page address: keep the image tags on the
    canonical hosted PNG — applyShareMeta does the same whenever
    stats are in the link or a name is typed */
