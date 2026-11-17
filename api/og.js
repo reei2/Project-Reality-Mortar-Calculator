@@ -62,9 +62,41 @@ function b64ToUtf8(b64) {
   return new TextDecoder().decode(bytes);
 }
 
+function shareHash(s) {
+  // FNV-1a, 32-bit, as 6 base36 chars — same function as assets/app.js.
+  // A checksum, not a signature: anyone who recomputes it after editing
+  // can still fake a link; it only stops casual editing in the URL bar.
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return ("000000" + h.toString(36)).slice(-6);
+}
+
 /* Port of decodeShare() in assets/app.js — keep in sync with it. */
 function decodeShare(code) {
   if (!code) return null;
+  if (code.slice(0, 2) === "5-") {
+    // v5: "5-<map>-<nums>-<date>-<salt>-<name>-<hash>" — the hash is the
+    // last field and covers map, stats, date, salt and the encoded name;
+    // a mismatch means the link was edited by hand, so reject it (null).
+    const p5 = code.slice(2).split("-");
+    if (p5.length < 5) return null;
+    const hash5 = p5[p5.length - 1];
+    const nameCode5 = p5.slice(4, p5.length - 1).join("-");
+    if (shareHash(p5[0] + "|" + p5[1] + "|" + p5[2] + "|" + p5[3] + "|" + nameCode5) !== hash5) return null;
+    const mi = parseInt(p5[0], 36);
+    const ns = p5[1].split(".");
+    const n36 = (v) => { v = parseInt(v, 36); return isNaN(v) || v < 0 ? 0 : v; };
+    return {
+      n: nameCode5 ? shareNameFromCode(nameCode5) : "Anonymous mortar",
+      m: (!isNaN(mi) && MAPS[mi]) ? MAPS[mi] : "Kokan",
+      r: n36(ns[0]), d: n36(ns[1]), f: n36(ns[2]),
+      s: n36(ns[3]), b: n36(ns[4]),
+      dt: shareDateFromCode(p5[2])
+    };
+  }
   if (code.slice(0, 2) === "4-") {
     // v4: "4-<map>-<nums>-<date>-<salt>-<name>" — the salt is the
     // fifth field, rolled once per page load so every share link is a

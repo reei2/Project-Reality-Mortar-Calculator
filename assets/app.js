@@ -5414,22 +5414,60 @@ function shareSalt(){
   }
   return _shareSalt;
 }
+/* v5 hash (2026-11-18): a short checksum on the end of the code so a
+   hand-edited number is caught — the decoders recompute it and reject
+   the link when it does not match. FNV-1a, 32-bit, rendered as 6
+   base36 chars. It is a checksum, not a signature: the code is public,
+   so anyone who recomputes it after editing can still fake a link —
+   it only stops casual editing in the address bar. */
+function shareHash(s){
+  var h = 0x811c9dc5;
+  for (var i = 0; i < s.length; i++){
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return ("000000" + h.toString(36)).slice(-6);
+}
 function encodeShare(st){
   var dateCode = shareDateToCode(st.dt);
   var mapIdx = -1;
   for (var i = 0; i < MAPS.length; i++){ if (MAPS[i][0] === st.m){ mapIdx = i; break; } }
   if (mapIdx < 0 || (dateCode && dateCode.charAt(0) === "!")) return encodeShareV2(st);
   var nums = [st.r, st.d, st.f, st.s, st.b].map(function(v){ v = parseInt(v, 10); return (isNaN(v) || v < 0 ? 0 : v).toString(36); }).join(".");
-  /* v4: "4-<map>-<nums>-<date>-<salt>-<name>" — the salt sits in its
-     own fixed field before the name, so a "-" inside the name is
-     still safe (the name is everything after the fifth "-"). */
-  var code = "4-" + mapIdx.toString(36) + "-" + nums + "-" + dateCode + "-" + shareSalt();
+  /* v5: "5-<map>-<nums>-<date>-<salt>-<name>-<hash>" — the hash covers
+     map, stats, date, salt and the encoded name, so editing any of
+     them breaks it. The name sits before the hash (it is everything
+     between the salt and the last "-"), so a "-" inside it is safe. */
+  var mapCode = mapIdx.toString(36), salt = shareSalt();
   var name = String(st.n || "Anonymous mortar").slice(0, 40);
-  if (name && name !== "Anonymous mortar") code += "-" + shareNameToCode(name);
-  return code;
+  var nameCode = (name && name !== "Anonymous mortar") ? shareNameToCode(name) : "";
+  var hash = shareHash(mapCode + "|" + nums + "|" + dateCode + "|" + salt + "|" + nameCode);
+  var code = "5-" + mapCode + "-" + nums + "-" + dateCode + "-" + salt;
+  if (nameCode) code += "-" + nameCode;
+  return code + "-" + hash;
 }
 function decodeShare(code){
   if (!code) return null;
+  /* v5: plain "5-<map>-<nums>-<date>-<salt>-<name>-<hash>" — the hash
+     is the last field; if it does not match the rest of the code the
+     link was edited by hand and is rejected (null). */
+  if (code.slice(0, 2) === "5-"){
+    var p5 = code.slice(2).split("-");
+    if (p5.length < 5) return null;
+    var hash5 = p5[p5.length - 1];
+    var nameCode5 = p5.slice(4, p5.length - 1).join("-");
+    if (shareHash(p5[0] + "|" + p5[1] + "|" + p5[2] + "|" + p5[3] + "|" + nameCode5) !== hash5) return null;
+    var mi5 = parseInt(p5[0], 36);
+    var ns5 = p5[1].split(".");
+    var num36v5 = function(v){ v = parseInt(v, 36); return isNaN(v) || v < 0 ? 0 : v; };
+    return {
+      n: nameCode5 ? shareNameFromCode(nameCode5) : "Anonymous mortar",
+      m: (!isNaN(mi5) && MAPS[mi5]) ? MAPS[mi5][0] : "Kokan",
+      r: num36v5(ns5[0]), d: num36v5(ns5[1]), f: num36v5(ns5[2]),
+      s: num36v5(ns5[3]), b: num36v5(ns5[4]),
+      dt: shareDateFromCode(p5[2])
+    };
+  }
   /* v4: plain "4-<map>-<nums>-<date>-<salt>-<name>" — the salt is the
      fifth field and is ignored; the name is everything after it */
   if (code.slice(0, 2) === "4-"){
