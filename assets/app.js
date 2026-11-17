@@ -5346,8 +5346,12 @@ function shareStatRows(st){
    decoder puts it back. A typical code is now ~18 chars with
    no name typed and ~22–30 chars with one, e.g.
    "3-h-1.0.0.0.0-1xs" or "3-h-5.a.k.2.5-1xs-Reei".
-   Unknown maps / unparseable dates fall back to the v2 code so
-   nothing is lost. Old v2 and v1 codes still decode below. */
+   v4 (2026-11-17) adds a 4-char random salt in its own field
+   before the name — "4-<map>-<nums>-<date>-<salt>-<name>" — so
+   every share link is a new address and Discord cannot serve a
+   stale cached preview for it; the salt is rolled once per page
+   load and ignored by the decoders. Old v3, v2 and v1 codes
+   still decode below. */
 var SHARE_EPOCH = Date.UTC(2020, 0, 1);
 var SHARE_MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function shareDateToCode(dt){
@@ -5392,19 +5396,56 @@ function encodeShareV2(st){
   var b64 = btoa(unescape(encodeURIComponent(payload)));
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
+/* v4 salt (2026-11-17): every share link carries a short random salt so
+   each link is a NEW address — Discord caches link previews per URL, so
+   a salted link can never show a stale cached preview of an older link
+   with the same name and stats. The salt is rolled ONCE per page load
+   and reused for every link built in that session: a fresh salt on
+   every keystroke would make the link flicker while the player types
+   their name, and a new session (a new share) is exactly when a fresh
+   preview is wanted. 4 base36 chars (~1.6M combinations); it is not a
+   secret and not part of the stats — the decoders ignore it. */
+var _shareSalt = null;
+function shareSalt(){
+  if (!_shareSalt){
+    var s = "";
+    while (s.length < 4) s += Math.random().toString(36).slice(2);
+    _shareSalt = s.slice(0, 4);
+  }
+  return _shareSalt;
+}
 function encodeShare(st){
   var dateCode = shareDateToCode(st.dt);
   var mapIdx = -1;
   for (var i = 0; i < MAPS.length; i++){ if (MAPS[i][0] === st.m){ mapIdx = i; break; } }
   if (mapIdx < 0 || (dateCode && dateCode.charAt(0) === "!")) return encodeShareV2(st);
   var nums = [st.r, st.d, st.f, st.s, st.b].map(function(v){ v = parseInt(v, 10); return (isNaN(v) || v < 0 ? 0 : v).toString(36); }).join(".");
-  var code = "3-" + mapIdx.toString(36) + "-" + nums + "-" + dateCode;
+  /* v4: "4-<map>-<nums>-<date>-<salt>-<name>" — the salt sits in its
+     own fixed field before the name, so a "-" inside the name is
+     still safe (the name is everything after the fifth "-"). */
+  var code = "4-" + mapIdx.toString(36) + "-" + nums + "-" + dateCode + "-" + shareSalt();
   var name = String(st.n || "Anonymous mortar").slice(0, 40);
   if (name && name !== "Anonymous mortar") code += "-" + shareNameToCode(name);
   return code;
 }
 function decodeShare(code){
   if (!code) return null;
+  /* v4: plain "4-<map>-<nums>-<date>-<salt>-<name>" — the salt is the
+     fifth field and is ignored; the name is everything after it */
+  if (code.slice(0, 2) === "4-"){
+    var parts = code.slice(2).split("-");
+    if (parts.length < 4) return null;
+    var mi4 = parseInt(parts[0], 36);
+    var ns4 = parts[1].split(".");
+    var num36v4 = function(v){ v = parseInt(v, 36); return isNaN(v) || v < 0 ? 0 : v; };
+    return {
+      n: parts.length > 4 ? shareNameFromCode(parts.slice(4).join("-")) : "Anonymous mortar",
+      m: (!isNaN(mi4) && MAPS[mi4]) ? MAPS[mi4][0] : "Kokan",
+      r: num36v4(ns4[0]), d: num36v4(ns4[1]), f: num36v4(ns4[2]),
+      s: num36v4(ns4[3]), b: num36v4(ns4[4]),
+      dt: shareDateFromCode(parts[2])
+    };
+  }
   /* v3: plain "3-<map>-<nums>-<date>-<name>" — the name is the
      remainder after the third "-", so "-" inside it is safe */
   if (code.slice(0, 2) === "3-"){

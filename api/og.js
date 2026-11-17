@@ -65,6 +65,24 @@ function b64ToUtf8(b64) {
 /* Port of decodeShare() in assets/app.js — keep in sync with it. */
 function decodeShare(code) {
   if (!code) return null;
+  if (code.slice(0, 2) === "4-") {
+    // v4: "4-<map>-<nums>-<date>-<salt>-<name>" — the salt is the
+    // fifth field, rolled once per page load so every share link is a
+    // new address Discord cannot serve a stale cached preview for;
+    // it is ignored here and the name is everything after it.
+    const parts = code.slice(2).split("-");
+    if (parts.length < 4) return null;
+    const mi = parseInt(parts[0], 36);
+    const ns = parts[1].split(".");
+    const n36 = (v) => { v = parseInt(v, 36); return isNaN(v) || v < 0 ? 0 : v; };
+    return {
+      n: parts.length > 4 ? shareNameFromCode(parts.slice(4).join("-")) : "Anonymous mortar",
+      m: (!isNaN(mi) && MAPS[mi]) ? MAPS[mi] : "Kokan",
+      r: n36(ns[0]), d: n36(ns[1]), f: n36(ns[2]),
+      s: n36(ns[3]), b: n36(ns[4]),
+      dt: shareDateFromCode(parts[2])
+    };
+  }
   if (code.slice(0, 2) === "3-") {
     const rest = code.slice(2);
     const i1 = rest.indexOf("-");
